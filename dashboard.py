@@ -68,18 +68,18 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
         low=ticker_data["low"],
         close=ticker_data["close"],
         name="株価",
-        increasing=dict(line_color="#3D9970", fillcolor="#3D9970"),
-        decreasing=dict(line_color="#FF4136", fillcolor="#FF4136"),
+        increasing=dict(line_color="#66BB6A", fillcolor="#66BB6A"),
+        decreasing=dict(line_color="#EF5350", fillcolor="#EF5350"),
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25, mode="lines", name="25EMA",
-        line=dict(color="#FF9800", width=1.5),
+        line=dict(color="#0D47A1", width=1.5),
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema_short, mode="lines", name=f"{GOLDEN_CROSS_SHORT}EMA",
-        line=dict(color="#FFD700", width=1.5),
+        line=dict(color="#EB6101", width=1.5),
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(

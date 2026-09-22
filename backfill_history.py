@@ -8,7 +8,7 @@ from storage import append_dedup
 
 BATCH_SIZE = 200
 SLEEP_BETWEEN_BATCHES = 2
-BACKFILL_PERIOD = "3mo"  # 21営業日分の相対強度計算に十分な余裕を持たせる
+BACKFILL_PERIOD = "1y"  # 週足表示・将来の長期EMA計算に十分な余裕を持たせる
 OHLCV_FILE = "daily_ohlcv.csv"
 FIELDS = ["Open", "High", "Low", "Close", "Volume"]
 BENCHMARK_TICKER = "1306.T"

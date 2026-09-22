@@ -32,14 +32,29 @@ def load_close_wide_cached():
     return load_close_wide(OHLCV_FILE)
 
 
-def render_chart(ticker, ohlcv, close_wide, key_prefix):
-    ticker_data = ohlcv[ohlcv["ticker"] == ticker].sort_values("date")
+def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
+    full_data = ohlcv[ohlcv["ticker"] == ticker].sort_values("date")
 
-    if ticker_data.empty:
+    if full_data.empty:
         st.warning("価格データがありません")
         return
 
+    # 指標は全期間データで計算してから表示範囲を絞り込む（EMA等のウォームアップを保つため）
+    ema25 = full_data["close"].ewm(span=25, adjust=False).mean()
+    ema_short = full_data["close"].ewm(span=GOLDEN_CROSS_SHORT, adjust=False).mean()
+    rolling_std = full_data["close"].rolling(25).std()
     rs_series = relative_strength_series(ticker, close_wide, BENCHMARK_TICKER, RS_PERIOD)
+
+    if display_days is not None:
+        cutoff = full_data["date"].max() - pd.Timedelta(days=display_days)
+        mask = full_data["date"] >= cutoff
+        ticker_data = full_data[mask]
+        ema25 = ema25[mask]
+        ema_short = ema_short[mask]
+        rolling_std = rolling_std[mask]
+        rs_series = rs_series[rs_series.index >= cutoff]
+    else:
+        ticker_data = full_data
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -57,29 +72,35 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix):
         decreasing=dict(line_color="#FF4136", fillcolor="#FF4136"),
     ), row=1, col=1)
 
-    ema25 = ticker_data["close"].ewm(span=25, adjust=False).mean()
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25, mode="lines", name="25EMA",
         line=dict(color="#FF9800", width=1.5),
     ), row=1, col=1)
 
-    ema_short = ticker_data["close"].ewm(span=GOLDEN_CROSS_SHORT, adjust=False).mean()
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema_short, mode="lines", name=f"{GOLDEN_CROSS_SHORT}EMA",
         line=dict(color="#FFD700", width=1.5),
     ), row=1, col=1)
 
-    rolling_std = ticker_data["close"].rolling(25).std()
-    for multiplier in [1, 2]:
-        for sign, label in [(1, f"+{multiplier}σ"), (-1, f"-{multiplier}σ")]:
-            fig.add_trace(go.Scatter(
-                x=ticker_data["date"],
-                y=ema25 + sign * multiplier * rolling_std,
-                mode="lines",
-                name=label,
-                line=dict(color="#FF9800", width=1),
-                showlegend=False,
-            ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=ticker_data["date"], y=ema25 + 2 * rolling_std, mode="lines", name="+2σ",
+        line=dict(color="#2196F3", width=1), showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=ticker_data["date"], y=ema25 - 2 * rolling_std, mode="lines", name="-2σ",
+        line=dict(color="#2196F3", width=1),
+        fill="tonexty", fillcolor="rgba(33, 150, 243, 0.15)",
+        showlegend=False,
+    ), row=1, col=1)
+    for sign, label in [(1, "+1σ"), (-1, "-1σ")]:
+        fig.add_trace(go.Scatter(
+            x=ticker_data["date"],
+            y=ema25 + sign * rolling_std,
+            mode="lines",
+            name=label,
+            line=dict(color="#2196F3", width=1),
+            showlegend=False,
+        ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
         x=rs_series.index,
@@ -99,7 +120,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix):
     st.plotly_chart(fig, width="stretch", key=f"chart_{key_prefix}")
 
 
-def render_screening_tab(display_df, key_prefix, ohlcv, close_wide):
+def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days):
     if display_df.empty:
         st.info("該当する銘柄はありません")
         return
@@ -123,10 +144,16 @@ def render_screening_tab(display_df, key_prefix, ohlcv, close_wide):
 
     with col_chart:
         st.subheader("日足チャート")
-        render_chart(selected_ticker, ohlcv, close_wide, key_prefix)
+        render_chart(selected_ticker, ohlcv, close_wide, key_prefix, display_days)
 
 
 st.title("📈 日本株 スクリーニング")
+
+with st.sidebar:
+    st.subheader("表示設定")
+    period_map = {"1ヶ月": 30, "3ヶ月": 90, "6ヶ月": 180, "1年": 365, "全期間": None}
+    period_label = st.selectbox("チャート表示期間", list(period_map.keys()), index=2)
+    display_days = period_map[period_label]
 
 ohlcv = load_ohlcv()
 close_wide = load_close_wide_cached()
@@ -139,7 +166,7 @@ with tab_rs:
     display_df = ranking.copy()
     display_df["RS(%)"] = (display_df["relative_strength"] * 100).round(2)
     display_df = display_df[["ticker", "銘柄名", "33業種区分", "RS(%)"]].rename(columns={"33業種区分": "業種"})
-    render_screening_tab(display_df, "rs", ohlcv, close_wide)
+    render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days)
 
 with tab_golden:
     golden = load_golden_cross()
@@ -150,7 +177,7 @@ with tab_golden:
         display_df = golden[["ticker", "銘柄名", "33業種区分", "cross_date"]].rename(
             columns={"33業種区分": "業種", "cross_date": "クロス日"}
         )
-    render_screening_tab(display_df, "golden", ohlcv, close_wide)
+    render_screening_tab(display_df, "golden", ohlcv, close_wide, display_days)
 
 st.divider()
 st.caption(

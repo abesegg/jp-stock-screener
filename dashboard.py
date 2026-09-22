@@ -58,7 +58,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.7, 0.3], vertical_spacing=0.03,
+        row_heights=[0.8, 0.2], vertical_spacing=0.03,
         subplot_titles=("", f"対TOPIX相対強度（{RS_PERIOD}営業日騰落率差, %）"),
     )
     fig.add_trace(go.Candlestick(
@@ -84,12 +84,12 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
 
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25 + 2 * rolling_std, mode="lines", name="+2σ",
-        line=dict(color="#2196F3", width=1), showlegend=False,
+        line=dict(color="#64B5F6", width=1), showlegend=False,
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25 - 2 * rolling_std, mode="lines", name="-2σ",
-        line=dict(color="#2196F3", width=1),
-        fill="tonexty", fillcolor="rgba(33, 150, 243, 0.15)",
+        line=dict(color="#64B5F6", width=1),
+        fill="tonexty", fillcolor="rgba(100, 181, 246, 0.15)",
         showlegend=False,
     ), row=1, col=1)
     for sign, label in [(1, "+1σ"), (-1, "-1σ")]:
@@ -98,7 +98,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
             y=ema25 + sign * rolling_std,
             mode="lines",
             name=label,
-            line=dict(color="#2196F3", width=1),
+            line=dict(color="#64B5F6", width=1),
             showlegend=False,
         ), row=1, col=1)
 
@@ -112,7 +112,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
     fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
 
     fig.update_layout(
-        height=750,
+        height=600,
         xaxis_rangeslider_visible=False,
         margin=dict(l=20, r=20, t=30, b=20),
         showlegend=False,

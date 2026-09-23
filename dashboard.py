@@ -42,6 +42,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
     # 指標は全期間データで計算してから表示範囲を絞り込む（EMA等のウォームアップを保つため）
     ema25 = full_data["close"].ewm(span=25, adjust=False).mean()
     ema_short = full_data["close"].ewm(span=GOLDEN_CROSS_SHORT, adjust=False).mean()
+    ema75 = full_data["close"].ewm(span=75, adjust=False).mean()
     rolling_std = full_data["close"].rolling(25).std()
     rs_series = relative_strength_series(ticker, close_wide, BENCHMARK_TICKER, RS_PERIOD)
 
@@ -51,6 +52,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
         ticker_data = full_data[mask]
         ema25 = ema25[mask]
         ema_short = ema_short[mask]
+        ema75 = ema75[mask]
         rolling_std = rolling_std[mask]
         rs_series = rs_series[rs_series.index >= cutoff]
     else:
@@ -74,7 +76,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
 
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25, mode="lines", name="25EMA",
-        line=dict(color="#0D47A1", width=1.5),
+        line=dict(color="#2196F3", width=1.5),
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
@@ -83,12 +85,17 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
+        x=ticker_data["date"], y=ema75, mode="lines", name="75EMA",
+        line=dict(color="#C0CA33", width=1.5),
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25 + 2 * rolling_std, mode="lines", name="+2σ",
-        line=dict(color="#64B5F6", width=1), showlegend=False,
+        line=dict(color="#64B5F6", width=0.5), showlegend=False,
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25 - 2 * rolling_std, mode="lines", name="-2σ",
-        line=dict(color="#64B5F6", width=1),
+        line=dict(color="#64B5F6", width=0.5),
         fill="tonexty", fillcolor="rgba(100, 181, 246, 0.15)",
         showlegend=False,
     ), row=1, col=1)
@@ -98,7 +105,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
             y=ema25 + sign * rolling_std,
             mode="lines",
             name=label,
-            line=dict(color="#64B5F6", width=1),
+            line=dict(color="#64B5F6", width=0.5),
             showlegend=False,
         ), row=1, col=1)
 

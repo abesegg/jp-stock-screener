@@ -8,8 +8,8 @@
 - プロジェクト場所: `03_projects/python/jp-stock-screener/`（作成済み）
 - データ取得: `yfinance`（導入済み）
 - データ処理: `pandas`（導入済み）
-- 出力先: 当面はローカル保存（CSV等）で進める。クラウド（Google Sheets等）から他サービスが参照できる形は将来的な拡張として保留
-- 定期実行: 将来的にGitHub Actionsでcron実行を検討（ローカル運用が安定してから）
+- 出力先: ローカル保存（CSV）に加え、ダッシュボードはStreamlit Community Cloudにデプロイ済み（GitHubリポジトリ作成済み、そこと連携してデプロイ）
+- 定期実行: Mac miniの`LaunchDaemon`で実行する方針に決定（詳細は「定期実行の方針」セクション参照）
 
 ## 段階的な進め方
 
@@ -22,10 +22,10 @@
 7. 流動性フィルタ通過銘柄に対しTOPIX相対強度でスクリーニング ✅完了（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）
 8. ゴールデンクロス（初動）スクリーニングを追加 ✅完了（`filters.py`, `run_golden_cross.py`, `golden_cross.csv`）
 9. ランキング閲覧・チャート表示用のダッシュボードを実装 ✅完了（`dashboard.py`、Streamlit + Plotly）
-10. （将来検討）日々の通知の実装（現状は結果CSVをダッシュボードで手動確認）
-11. （将来検討）GitHub Actionsで定時実行に移行 ← 次はここ
-
-ローカル運用でしばらく様子見する方針。
+10. ダッシュボードをStreamlit Community Cloudにデプロイ ✅完了（GitHubリポジトリ作成・連携済み）
+11. 定期実行の方式を決定 ✅完了（Mac miniの`LaunchDaemon`を採用、詳細は下記セクション）
+12. （将来検討）日々の通知の実装（現状は結果CSVをダッシュボードで手動確認）
+13. Mac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録） ← 次はここ（別途Mac mini上のClaude Codeセッションで進める）
 
 ## 流動性フィルタの仕様
 
@@ -90,11 +90,10 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **タブ構成**: 「RS上位」「ゴールデンクロス」の2タブ。それぞれ独立したリスト+チャートの組み合わせで、`render_screening_tab()`として共通化（条件が増えてもこの関数を呼び出すだけで追加可能）
 - **リスト選択**: `st.dataframe`の`on_select="rerun"` + `selection_mode="single-row"`で行クリックによる選択に対応（デフォルトの`st.dataframe`は表示専用のため明示的な設定が必要だった）
 - **チャート内容**（`render_chart()`で共通化）:
-  - ローソク足（陽線・陰線とも線と塗りつぶしを同色に統一）
-  - 25EMA（オレンジ、線幅1.5）
-  - 5EMA（黄色、線幅1。ゴールデンクロス判定と同じ期間で、クロスの様子を目視確認できる）
-  - 25EMAを中心としたボリンジャーバンド±1σ・±2σ（25EMAと同色・より細い実線）
-  - 下段サブプロットに対TOPIX相対強度（21営業日）の時系列
+  - ローソク足（陽線・陰線とも線と塗りつぶしを同色に統一、視認性を考慮してやや淡い色を採用）
+  - 25EMA・5EMA・75EMA（それぞれ別色。5EMAはゴールデンクロス判定と同じ期間で、クロスの様子を目視確認できる）
+  - 25EMAを中心としたボリンジャーバンド±1σ・±2σ（ローソク足・EMAと被らない薄い青系統、塗りつぶし付き）
+  - 下段サブプロットに対TOPIX相対強度（21営業日）の時系列。インジケータ的な位置づけなので主役のローソク足より小さい比率（高さ比0.8:0.2）で表示
 - **既知の制約**:
   - 上記インジケータは全て過去データの蓄積量に依存するため、蓄積初期は表示期間の前半が空白になる（ウォームアップ期間）。データ蓄積が進めば解消
   - **開発上の注意**: Streamlitサーバーは`dashboard.py`本体の変更は自動検知して再実行するが、`import`しているモジュール（`filters.py`, `storage.py`など）はPythonの`sys.modules`にキャッシュされるため、それらを編集した場合はサーバーの再起動が必要（自動リロードでは反映されない）
@@ -110,10 +109,20 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **対応**: 正しい値の取得ができないため、前後の営業日（2026-03-27, 2026-04-01）から線形補間した値で`daily_ohlcv.csv`の該当2日分を手動修正。修正後、異常値は解消（-970%前後 → 通常範囲の16〜49%程度）を確認
 - **今後の懸念**: 同様の孤立した異常値が他の銘柄にも潜んでいる可能性がある。現状は個別に気づいた都度対応する方針だが、頻発するようなら`load_close_wide()`への汎用的な異常値検出・除去ロジックの追加を検討
 
+## 定期実行の方針
+
+`daily_update.py`（および月次の`fetch_universe.py`/`screening.py`）を自動実行する方式として、GitHub Actionsではなく**Mac miniの`LaunchDaemon`**を採用することに決定。
+
+- **比較した選択肢**: GitHub Actions／ローカルのlaunchd（Mac mini）／VPS常時cron／サーバーレス（AWS Lambda等）／PythonAnywhere等のPaaS
+- **launchdを選んだ理由**: 常時稼働のMac miniが既にあるため、GitHub Actionsの最大の利点（「自分のPCが起きていなくても実行できる」）が意味を持たない。一方でGitHub Actionsはランナーが使い捨てのため、`daily_ohlcv.csv`への追記結果をgit commit＆pushで書き戻す仕組みが別途必要になり、その分セットアップの手間が増える。launchdなら今のローカル運用のコード・データの持ち方を一切変えずに済む
+- **LaunchAgentではなくLaunchDaemonを採用する理由**: `LaunchAgent`はGUIログインセッションが必要だが、`LaunchDaemon`はログイン状態に関係なく動作する。今回のジョブは画面表示が不要なバックグラウンド処理なので、Mac miniのログイン状態を気にしなくて済む`LaunchDaemon`の方が適している（実行ユーザーは`plist`の`UserName`キーで指定する）
+- **Streamlit Cloudとの連携**: ダッシュボードはGitHubリポジトリと連携してStreamlit Community Cloud上にデプロイ済み。ダッシュボードが参照するCSVはリポジトリ内のものなので、Mac miniで`daily_update.py`を実行した後は**git commit＆pushまで自動化する**必要がある（LaunchDaemonから呼ぶスクリプト内に組み込む想定）
+- **セットアップの進め方**: 開発は引き続きMacBook Airで行い、Mac miniには実行用としてリポジトリをcloneするのみ。Mac mini側の作業（`git clone`、`uv sync`、`LaunchDaemon`登録）は、Mac mini上で別途起動するClaude Codeセッションで進める方針（Claude Codeのセッション履歴はマシンごとに独立しており引き継がれないため、このREADME.mdが引き継ぎの起点になる）
+
 ## 検討して見送った代替案
 
-- GAS + J-Quants: J-Quants無料プランはデータ遅延が大きく直近終値が取れない、GASは実行時間制限（最大6分）や集計処理の書きにくさがあるため不採用。現行のyfinance + GitHub Actions案を継続
+- GAS + J-Quants: J-Quants無料プランはデータ遅延が大きく直近終値が取れない、GASは実行時間制限（最大6分）や集計処理の書きにくさがあるため不採用。現行のyfinance + ローカル実行案を継続
 
 ## 現在の進捗
 
-プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）まで完了。日々の通知の実装とGitHub Actionsでの定時実行が未着手。ローカル運用でしばらく様子見する方針。
+プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。次はMac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録、Mac mini上の別Claude Codeセッションで実施予定）。日々の通知の実装は未着手。

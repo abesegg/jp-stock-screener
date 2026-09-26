@@ -25,7 +25,7 @@
 10. ダッシュボードをStreamlit Community Cloudにデプロイ ✅完了（GitHubリポジトリ作成・連携済み）
 11. 定期実行の方式を決定 ✅完了（Mac miniの`LaunchDaemon`を採用、詳細は下記セクション）
 12. （将来検討）日々の通知の実装（現状は結果CSVをダッシュボードで手動確認）
-13. Mac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録） ← 次はここ（別途Mac mini上のClaude Codeセッションで進める）
+13. Mac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録） ← 進行中（Mac mini上のClaude Codeセッションで実施。`uv`導入・`uv sync`・手動実行の確認まで完了。次は`LaunchDaemon`登録）
 
 ## 流動性フィルタの仕様
 
@@ -51,7 +51,7 @@
   - `fetch_universe.py`: JPX公式データから`universe.csv`を再生成
   - `screening.py`: 更新された全銘柄で`period="1mo"`のデータを取得し、流動性フィルタ（10日中央値売買代金）を再計算、`screening_result.csv`に保存
 - **日次**（終値・出来高の蓄積）
-  - `daily_update.py`: `universe.csv`の全銘柄を対象に、直近1日分のOHLCV（Open/High/Low/Close/Volume）を取得（`period="5d"`で取得し最新行を採用。土日・祝日による欠損に対応するため余裕を持たせている）
+  - `daily_update.py`: `universe.csv`の全銘柄を対象に、OHLCV（Open/High/Low/Close/Volume）を`period="5d"`で取得し、取得できた全営業日分を保存（当初は最新行のみ保存していたが、実行漏れの日がそのまま欠損として残るため2026年9月に変更。直近5日以内の実行漏れなら次回実行で自動補完され、取引時間中に取得した暫定値も次回実行で確定値に上書きされる）
   - 結果を`daily_ohlcv.csv`（long形式: `date, ticker, open, high, low, close, volume`）に追記。同一日付・銘柄の組み合わせは上書きし重複を防止
   - ファイルは月単位で分割せず、単一ファイルに追記し続ける方針（新規上場・廃止は行の増減として自然に吸収されるため）
   - 当初はClose/Volumeのみ`daily_close.csv`/`daily_volume.csv`に分けて保存していたが、将来的なローソク足チャート描画には四本値（OHLC）が必要なため`daily_ohlcv.csv`に統合。yfinanceは元々OHLCVを一括取得しているため追加の取得コストは発生しない
@@ -125,4 +125,4 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 
 ## 現在の進捗
 
-プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。次はMac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録、Mac mini上の別Claude Codeセッションで実施予定）。日々の通知の実装は未着手。
+プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入（`~/.local/bin/uv`）・`uv sync`・`daily_update.py`の手動実行確認まで完了。次は日次更新〜git commit＆pushのラッパースクリプト作成と`LaunchDaemon`登録。日々の通知の実装は未着手。

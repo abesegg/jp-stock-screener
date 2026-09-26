@@ -26,22 +26,24 @@ for i, batch in enumerate(batches, start=1):
         failed_tickers.extend(batch)
         continue
 
-    latest = {field: data[field].iloc[-1] for field in FIELDS}
-    date = data.index[-1].strftime("%Y-%m-%d")
+    # 取得した全営業日を保存する（実行漏れの日があっても直近5日以内なら次回実行で自動補完される）
+    for ts in data.index:
+        date = ts.strftime("%Y-%m-%d")
+        day = {field: data[field].loc[ts] for field in FIELDS}
 
-    for ticker in batch:
-        if ticker in latest["Close"].index and pd.notna(latest["Close"][ticker]):
-            rows.append({
-                "date": date,
-                "ticker": ticker,
-                "open": latest["Open"][ticker],
-                "high": latest["High"][ticker],
-                "low": latest["Low"][ticker],
-                "close": latest["Close"][ticker],
-                "volume": latest["Volume"][ticker],
-            })
-        else:
-            failed_tickers.append(ticker)
+        for ticker in batch:
+            if ticker in day["Close"].index and pd.notna(day["Close"][ticker]):
+                rows.append({
+                    "date": date,
+                    "ticker": ticker,
+                    "open": day["Open"][ticker],
+                    "high": day["High"][ticker],
+                    "low": day["Low"][ticker],
+                    "close": day["Close"][ticker],
+                    "volume": day["Volume"][ticker],
+                })
+            elif ts == data.index[-1]:
+                failed_tickers.append(ticker)
 
     if i < len(batches):
         time.sleep(SLEEP_BETWEEN_BATCHES)
@@ -49,7 +51,7 @@ for i, batch in enumerate(batches, start=1):
 
 combined = append_dedup(pd.DataFrame(rows), OHLCV_FILE, ["date", "ticker"])
 
-print(f"\n取得成功: {len(rows)}銘柄 / 取得失敗: {len(failed_tickers)}銘柄")
+print(f"\n取得成功: {len(tickers) - len(failed_tickers)}銘柄（{len(rows)}行）/ 取得失敗: {len(failed_tickers)}銘柄")
 print(f"{OHLCV_FILE}: 累計{len(combined)}行")
 
 if failed_tickers:

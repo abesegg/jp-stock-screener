@@ -11,3 +11,6 @@ wheels/
 
 # LaunchDaemonのジョブログ
 logs/
+
+# Discord Webhook URLなどの秘密情報
+.env

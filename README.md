@@ -10,6 +10,7 @@
 - データ処理: `pandas`（導入済み）
 - 出力先: ローカル保存（CSV）に加え、ダッシュボードはStreamlit Community Cloudにデプロイ済み（GitHubリポジトリ作成済み、そこと連携してデプロイ）
 - 定期実行: Mac miniの`LaunchDaemon`で実行する方針に決定（詳細は「定期実行の方針」セクション参照）
+- 通知: Discord Webhookで日次ジョブの結果を通知（詳細は「通知（Discord Webhook）」セクション参照）
 
 ## 段階的な進め方
 
@@ -24,7 +25,7 @@
 9. ランキング閲覧・チャート表示用のダッシュボードを実装 ✅完了（`dashboard.py`、Streamlit + Plotly）
 10. ダッシュボードをStreamlit Community Cloudにデプロイ ✅完了（GitHubリポジトリ作成・連携済み）
 11. 定期実行の方式を決定 ✅完了（Mac miniの`LaunchDaemon`を採用、詳細は下記セクション）
-12. （将来検討）日々の通知の実装（現状は結果CSVをダッシュボードで手動確認）
+12. 日々の通知の実装 ✅完了（`notify.py`、Discord Webhookで成功・失敗と新規銘柄を通知）
 13. Mac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録） ← 進行中（Mac mini上のClaude Codeセッションで実施。`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成、`~/claude-work`への移動・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。データ更新が正しく行われるかは、市場が開く2026-09-28(月)夕方の定期実行で確認する）
 14. （将来検討）月次ジョブ（`fetch_universe.py`/`screening.py`）の自動化
 
@@ -66,7 +67,7 @@
 - **ベンチマーク**: TOPIX指数自体（`^TOPX`, `998405.T`）はyfinanceで404となり取得不可だったため、TOPIX連動ETFの`1306.T`（NEXT FUNDS TOPIX連動型上場投信）を代替として採用
 - **相対強度の算出方法**: 個別銘柄とTOPIX ETFの21営業日騰落率の差（個別銘柄の騰落率 − ベンチマークの騰落率）。IBD式RSレーティングのような複合期間の加重平均は複雑なため見送り、まずはシンプルな方式を採用
 - **抽出基準**: 流動性フィルタ通過銘柄のうち、相対強度上位10%（当初5%で開始し、もう少し下位まで見たいとの要望で10%に拡大）
-- **通知**: 現時点では未実装。`rs_ranking.csv`をダッシュボードで確認する運用。Slack/メール通知は将来検討
+- **通知**: 日次ジョブ終了時に、前回から新規にランク入りした銘柄をDiscordへ通知（「通知（Discord Webhook）」セクション参照）
 - **データ蓄積の前提**: 相対強度の計算には21営業日超のヒストリカルデータが必要なため、`backfill_history.py`で流動性フィルタ通過銘柄＋ベンチマークの過去分を一度だけバックフィルし、`daily_ohlcv.csv`に統合。以降は`daily_update.py`の日次更新で追随（ベンチマーク`1306.T`も日次取得対象に追加済み）。バックフィル期間は`2mo`→`3mo`→`1y`と段階的に拡大（週足表示や将来の長期EMAを見据えて、2026年9月時点で245日分、2025-09-18〜2026-09-18を蓄積。ファイルサイズは27MB・37万行程度で、CSVのまま数年は問題ない見込み）
 - **ファイル構成**:
   - `storage.py`: CSVへの重複除外追記処理を共通化（`daily_update.py`と`backfill_history.py`で共用）
@@ -121,16 +122,16 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **Streamlit Cloudとの連携**: ダッシュボードはGitHubリポジトリと連携してStreamlit Community Cloud上にデプロイ済み。ダッシュボードが参照するCSVはリポジトリ内のものなので、Mac miniで`daily_update.py`を実行した後は**git commit＆pushまで自動化する**必要がある（LaunchDaemonから呼ぶスクリプト内に組み込む想定）
 - **開発体制**（2026年9月27日変更）: データの取得・更新を常時稼働のMac miniで行うことになったため、開発もマシンごとに役割を分ける
   - **データ取得・スクリーニング系**（`daily_update.py`, `backfill_history.py`, `run_screening.py`, `run_golden_cross.py`, `filters.py`, `scripts/`）: Mac miniで開発する。実データ・実行環境（LaunchDaemon）がその場にあり検証しやすいため。MacBook Airで開発すると、動作確認が翌営業日18:00の定期実行を待つことになり効率が悪い
-  - **通知**（未実装、手順12）: Mac miniで開発する。日次ジョブ（`scripts/daily_job.sh`）の末尾に組み込む想定で、実データでの送信テストもMac miniでしか行えないため
+  - **通知**（`notify.py`、手順12）: Mac miniで開発する。日次ジョブ（`scripts/daily_job.sh`）の末尾に組み込む想定で、実データでの送信テストもMac miniでしか行えないため
   - **ダッシュボード**（`dashboard.py`）: MacBook Air・Mac miniのどちらで開発してもよい
   - マシン間の同期はGitHubの`develop`ブランチ経由で行う。Mac miniは平日毎日データ更新をpushするため、MacBook Airで作業を始める前には必ず`git pull`する。MacBook AirではデータCSV（`daily_ohlcv.csv`など）を編集・commitしない（競合を避けるため）
   - Mac miniでの開発時の注意: 日次ジョブは開発と同じ作業ツリーで動く。平日18:00の時点で`develop`以外のブランチにいたり、コードに未commitの変更があったりすると、意図しないブランチへのcommitや書きかけのコードの実行が起こりうる。18:00前後は`develop`にいて、コードの変更はcommit済みにしておく（`daily_job.sh`冒頭への安全チェック追加を検討中）
   - Claude Codeのセッション履歴はマシンごとに独立しており引き継がれないため、このREADME.mdがマシン間・セッション間の引き継ぎの起点になる
 - **Mac mini側のセットアップ状況**（2026年9月27日時点）
   - `uv`を公式インストーラで導入（`~/.local/bin/uv`）し、`uv sync`で環境構築済み。gitのユーザーはリポジトリローカルに`abesegg <abe.segg@gmail.com>`を設定済み。push用のSSH鍵は`~/.ssh/id_ed25519`（個人鍵・パスフレーズなし）。リポジトリ専用のDeploy keyへの切り替えは保留中
-  - `scripts/daily_job.sh`: LaunchDaemonから呼ばれる日次ジョブ。`git pull --rebase` → `daily_update.py` → `run_screening.py` → `run_golden_cross.py` → 変更があれば`develop`へcommit＆push。途中で失敗した場合はcommitしない（`set -e`）。LaunchDaemonは環境変数が最小限のため、`HOME`・`PATH`をスクリプト内で明示的に設定している
+  - `scripts/daily_job.sh`: LaunchDaemonから呼ばれる日次ジョブ。`git pull --rebase` → `daily_update.py` → `run_screening.py` → `run_golden_cross.py` → 変更があれば`develop`へcommit＆push → Discordへ結果を通知。途中で失敗した場合はcommitしない（`set -e`）。LaunchDaemonは環境変数が最小限のため、`HOME`・`PATH`をスクリプト内で明示的に設定している
   - `scripts/com.abesegg.jp-stock-screener.daily.plist`: 平日（月〜金）18:00に上記を実行。ログは`logs/daily_job.log`（git管理外）
-  - **`~/Documents`の外への移動**: 当初は`~/Documents/claude-work`に置いていたが、macOSのプライバシー保護（TCC）によりLaunchDaemonから`~/Documents`配下にアクセスできず、`posix_spawn(/bin/bash) ... Operation not permitted`（exit code 78: EX_CONFIG）で起動に失敗した。`/bin/bash`へのフルディスクアクセス付与は影響範囲が広すぎるため見送り、`claude-work`ごと`~/claude-work`へ移動する方針とした（移動後は`.venv`内の絶対パスが壊れるため`uv sync`で再作成する）
+  - **`~/Documents`の外への移動**: 当初は`~/Documents/claude-work`に置いていたが、macOSのプライバシー保護（TCC）によりLaunchDaemonから`~/Documents`配下にアクセスできず、`posix_spawn(/bin/bash) ... Operation not permitted`（exit code 78: EX_CONFIG）で起動に失敗した。`/bin/bash`へのフルディスクアクセス付与は影響範囲が広すぎるため見送り、`claude-work`ごと`~/claude-work`へ移動する方針とした（移動後は`.venv`内の絶対パスが壊れるため`uv sync`で再作成する）。移動・`uv sync --reinstall`（`.venv`内に旧パスが残っていたため）・LaunchDaemon再登録を実施し、`kickstart`での手動実行が正常終了（exit code 0）したことを確認済み（2026年9月27日）
   - 登録・解除・手動実行・状態確認のコマンド（plistを変更した場合は`bootout` → `cp` → `bootstrap`で再登録する）:
     ```bash
     sudo cp scripts/com.abesegg.jp-stock-screener.daily.plist /Library/LaunchDaemons/
@@ -142,10 +143,26 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
   - 失敗時の調査: `logs/daily_job.log`に何も出ていない場合はlaunchd側で起動に失敗している。`/usr/bin/log show --last 30m --predicate 'eventMessage CONTAINS "jp-stock-screener"'`で原因を確認する（zshでは組み込みの`log`と衝突するためフルパスで実行する）
   - 月次ジョブ（`fetch_universe.py`/`screening.py`）の自動化は未対応
 
+## 通知（Discord Webhook）
+
+日次ジョブの結果をDiscordへ通知する（`notify.py`、2026年9月追加）。
+
+- **方式の選択**: Discordプラグイン（Claude Codeのチャンネル機能）はClaude Codeセッションの起動中しか動かず、LaunchDaemonからの無人実行には向かないため、Discord Webhookへ直接POSTする方式を採用。標準ライブラリ（`urllib`）のみで実装し依存関係の追加なし
+- **成功時**: RS上位・ゴールデンクロスそれぞれの総数と、前回から**新規に入った銘柄**（各最大10件、超過分は「…ほか○銘柄」）、ダッシュボードのリンク（`<>`で囲みリンクプレビューを抑止）を通知
+- **新規判定**: `daily_job.sh`が`git pull`直後のcommitを`BASE_REF`として記録し、そのcommit時点のCSV（`git show`）と今回のCSVを比較。前日の結果はcommit済みなので別途状態ファイルを持つ必要がない
+- **失敗時**: `trap ERR`で失敗した行番号とexit codeを通知。通知自体の失敗ではジョブを失敗扱いにしない（`|| true`）
+- **設定**: Webhook URLとダッシュボードURLは`.env`（git管理外、権限600）に記載。GitHubにpushしているリポジトリのため、URLをコードに書かない
+    ```
+    DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+    DASHBOARD_URL=https://〇〇.streamlit.app
+    ```
+- **動作確認**: `uv run python notify.py success --base <git ref> --dry-run`で送信せずに通知文を表示できる
+- **1メッセージの文字数**: Discordの上限（2000文字）を超える場合は切り詰める（通常は700文字程度）
+
 ## 検討して見送った代替案
 
 - GAS + J-Quants: J-Quants無料プランはデータ遅延が大きく直近終値が取れない、GASは実行時間制限（最大6分）や集計処理の書きにくさがあるため不採用。現行のyfinance + ローカル実行案を継続
 
 ## 現在の進捗
 
-プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成（手動テストでcommit＆pushまで成功済み）、TCC回避のための`~/claude-work`への移動・`uv sync`・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。次の作業は、市場が開く2026-09-28(月)夕方の定期実行でデータ更新が正しく行われるかの確認（詳細は「定期実行の方針」参照）。開発はデータ取得系をMac mini、ダッシュボードはどちらでも行う体制に変更（「開発体制」参照）。日々の通知の実装は未着手。
+プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成（手動テストでcommit＆pushまで成功済み）、TCC回避のための`~/claude-work`への移動・`uv sync`・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。Discord Webhookによる日次通知（`notify.py`）も実装済み（詳細は「通知（Discord Webhook）」参照）。次の作業は、市場が開く2026-09-28(月)夕方の定期実行でデータ更新・commit＆push・Discord通知が正しく行われるかの確認（詳細は「定期実行の方針」参照）。開発はデータ取得系をMac mini、ダッシュボードはどちらでも行う体制に変更（「開発体制」参照）。月次ジョブの自動化は未着手。

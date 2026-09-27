@@ -32,6 +32,11 @@ def load_close_wide_cached():
     return load_close_wide(OHLCV_FILE)
 
 
+def data_as_of(ohlcv):
+    # スクリーニングの基準日（RS計算と揃えるためベンチマークの最新日を採用）
+    return ohlcv.loc[ohlcv["ticker"] == BENCHMARK_TICKER, "date"].max()
+
+
 def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
     full_data = ohlcv[ohlcv["ticker"] == ticker].sort_values("date")
 
@@ -164,6 +169,9 @@ with st.sidebar:
 
 ohlcv = load_ohlcv()
 close_wide = load_close_wide_cached()
+
+as_of = data_as_of(ohlcv)
+st.caption(f"データ基準日: {as_of:%Y-%m-%d}（{'月火水木金土日'[as_of.weekday()]}）の終値")
 
 tab_rs, tab_golden = st.tabs(["RS上位", "ゴールデンクロス"])
 

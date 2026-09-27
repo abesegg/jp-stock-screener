@@ -25,7 +25,7 @@
 10. ダッシュボードをStreamlit Community Cloudにデプロイ ✅完了（GitHubリポジトリ作成・連携済み）
 11. 定期実行の方式を決定 ✅完了（Mac miniの`LaunchDaemon`を採用、詳細は下記セクション）
 12. （将来検討）日々の通知の実装（現状は結果CSVをダッシュボードで手動確認）
-13. Mac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録） ← 進行中（Mac mini上のClaude Codeセッションで実施。`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成まで完了。`~/claude-work`へ移動後のLaunchDaemon再登録と動作確認が残り）
+13. Mac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録） ← 進行中（Mac mini上のClaude Codeセッションで実施。`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成、`~/claude-work`への移動・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。データ更新が正しく行われるかは、市場が開く2026-09-28(月)夕方の定期実行で確認する）
 14. （将来検討）月次ジョブ（`fetch_universe.py`/`screening.py`）の自動化
 
 ## 流動性フィルタの仕様
@@ -118,7 +118,12 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **launchdを選んだ理由**: 常時稼働のMac miniが既にあるため、GitHub Actionsの最大の利点（「自分のPCが起きていなくても実行できる」）が意味を持たない。一方でGitHub Actionsはランナーが使い捨てのため、`daily_ohlcv.csv`への追記結果をgit commit＆pushで書き戻す仕組みが別途必要になり、その分セットアップの手間が増える。launchdなら今のローカル運用のコード・データの持ち方を一切変えずに済む
 - **LaunchAgentではなくLaunchDaemonを採用する理由**: `LaunchAgent`はGUIログインセッションが必要だが、`LaunchDaemon`はログイン状態に関係なく動作する。今回のジョブは画面表示が不要なバックグラウンド処理なので、Mac miniのログイン状態を気にしなくて済む`LaunchDaemon`の方が適している（実行ユーザーは`plist`の`UserName`キーで指定する）
 - **Streamlit Cloudとの連携**: ダッシュボードはGitHubリポジトリと連携してStreamlit Community Cloud上にデプロイ済み。ダッシュボードが参照するCSVはリポジトリ内のものなので、Mac miniで`daily_update.py`を実行した後は**git commit＆pushまで自動化する**必要がある（LaunchDaemonから呼ぶスクリプト内に組み込む想定）
-- **セットアップの進め方**: 開発は引き続きMacBook Airで行い、Mac miniには実行用としてリポジトリをcloneするのみ。Mac mini側の作業（`git clone`、`uv sync`、`LaunchDaemon`登録）は、Mac mini上で別途起動するClaude Codeセッションで進める方針（Claude Codeのセッション履歴はマシンごとに独立しており引き継がれないため、このREADME.mdが引き継ぎの起点になる）
+- **開発体制**（2026年9月27日変更）: データの取得・更新を常時稼働のMac miniで行うことになったため、開発もマシンごとに役割を分ける
+  - **データ取得・スクリーニング系**（`daily_update.py`, `backfill_history.py`, `run_screening.py`, `run_golden_cross.py`, `filters.py`, `scripts/`）: Mac miniで開発する。実データ・実行環境（LaunchDaemon）がその場にあり検証しやすいため。MacBook Airで開発すると、動作確認が翌営業日18:00の定期実行を待つことになり効率が悪い
+  - **ダッシュボード**（`dashboard.py`）: MacBook Air・Mac miniのどちらで開発してもよい
+  - マシン間の同期はGitHubの`develop`ブランチ経由で行う。Mac miniは平日毎日データ更新をpushするため、MacBook Airで作業を始める前には必ず`git pull`する。MacBook AirではデータCSV（`daily_ohlcv.csv`など）を編集・commitしない（競合を避けるため）
+  - Mac miniでの開発時の注意: 日次ジョブは開発と同じ作業ツリーで動く。平日18:00の時点で`develop`以外のブランチにいたり、コードに未commitの変更があったりすると、意図しないブランチへのcommitや書きかけのコードの実行が起こりうる。18:00前後は`develop`にいて、コードの変更はcommit済みにしておく（`daily_job.sh`冒頭への安全チェック追加を検討中）
+  - Claude Codeのセッション履歴はマシンごとに独立しており引き継がれないため、このREADME.mdがマシン間・セッション間の引き継ぎの起点になる
 - **Mac mini側のセットアップ状況**（2026年9月27日時点）
   - `uv`を公式インストーラで導入（`~/.local/bin/uv`）し、`uv sync`で環境構築済み。gitのユーザーはリポジトリローカルに`abesegg <abe.segg@gmail.com>`を設定済み。push用のSSH鍵は`~/.ssh/id_ed25519`（個人鍵・パスフレーズなし）。リポジトリ専用のDeploy keyへの切り替えは保留中
   - `scripts/daily_job.sh`: LaunchDaemonから呼ばれる日次ジョブ。`git pull --rebase` → `daily_update.py` → `run_screening.py` → `run_golden_cross.py` → 変更があれば`develop`へcommit＆push。途中で失敗した場合はcommitしない（`set -e`）。LaunchDaemonは環境変数が最小限のため、`HOME`・`PATH`をスクリプト内で明示的に設定している
@@ -141,4 +146,4 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 
 ## 現在の進捗
 
-プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成まで完了（手動テストでcommit＆pushまで成功済み）。TCCの制約により`claude-work`を`~/claude-work`へ移動し、`uv sync`・LaunchDaemonの再登録・`kickstart`での動作確認を行うのが次の作業（詳細は「定期実行の方針」参照）。日々の通知の実装は未着手。
+プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成（手動テストでcommit＆pushまで成功済み）、TCC回避のための`~/claude-work`への移動・`uv sync`・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。次の作業は、市場が開く2026-09-28(月)夕方の定期実行でデータ更新が正しく行われるかの確認（詳細は「定期実行の方針」参照）。開発はデータ取得系をMac mini、ダッシュボードはどちらでも行う体制に変更（「開発体制」参照）。日々の通知の実装は未着手。

@@ -26,7 +26,7 @@
 10. ダッシュボードをStreamlit Community Cloudにデプロイ ✅完了（GitHubリポジトリ作成・連携済み）
 11. 定期実行の方式を決定 ✅完了（Mac miniの`LaunchDaemon`を採用、詳細は下記セクション）
 12. 日々の通知の実装 ✅完了（`notify.py`、Discord Webhookで成功・失敗と新規銘柄を通知）
-13. Mac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録） ← 進行中（Mac mini上のClaude Codeセッションで実施。`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成、`~/claude-work`への移動・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。データ更新が正しく行われるかは、市場が開く2026-09-28(月)夕方の定期実行で確認する）
+13. Mac mini側のセットアップ（リポジトリclone・`uv sync`・`LaunchDaemon`登録） ✅完了（Mac mini上のClaude Codeセッションで実施。2026-09-28(月)から平日18:00の定期実行が稼働し、データ更新・commit＆push・Discord通知が正常に行われていることを確認）
 14. （将来検討）月次ジョブ（`fetch_universe.py`/`screening.py`）の自動化
 
 ## 流動性フィルタの仕様
@@ -92,7 +92,7 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **タブ構成**: 「RS上位」「ゴールデンクロス」の2タブ。それぞれ独立したリスト+チャートの組み合わせで、`render_screening_tab()`として共通化（条件が増えてもこの関数を呼び出すだけで追加可能）
 - **リスト選択**: `st.dataframe`の`on_select="rerun"` + `selection_mode="single-row"`で行クリックによる選択に対応（デフォルトの`st.dataframe`は表示専用のため明示的な設定が必要だった）
 - **チャート内容**（`render_chart()`で共通化）:
-  - ローソク足（陽線・陰線とも線と塗りつぶしを同色に統一、視認性を考慮してやや淡い色を採用）
+  - ローソク足（陽線・陰線とも線と塗りつぶしを同色に統一、視認性を考慮してやや淡い色を採用）。隣り合うローソク足が詰まって見えたため、2026年10月に細めに調整: ひげ（実体の枠線も兼ねる）の太さは`line.width=1.2`（既定2）、実体の幅はレイアウトの`boxgap=0.4`（日付間隔に対する隙間の割合、既定0.3。実体幅は間隔の60%）
   - 25EMA・5EMA・75EMA（それぞれ別色。5EMAはゴールデンクロス判定と同じ期間で、クロスの様子を目視確認できる）
   - 25EMAを中心としたボリンジャーバンド±1σ・±2σ（ローソク足・EMAと被らない薄い青系統、塗りつぶし付き）
   - 下段サブプロットに対TOPIX相対強度（21営業日）の時系列。インジケータ的な位置づけなので主役のローソク足より小さい比率（高さ比0.8:0.2）で表示
@@ -101,6 +101,7 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
   - **開発上の注意**: Streamlitサーバーは`dashboard.py`本体の変更は自動検知して再実行するが、`import`しているモジュール（`filters.py`, `storage.py`など）はPythonの`sys.modules`にキャッシュされるため、それらを編集した場合はサーバーの再起動が必要（自動リロードでは反映されない）
 - 依存関係として`streamlit`・`plotly`を追加
 - **表示期間セレクタ**（2026年9月追加）: サイドバーに「1ヶ月/3ヶ月/6ヶ月/1年/全期間」の`st.selectbox`を追加（デフォルト6ヶ月）。EMA・ボリンジャーバンド・RSは常に全期間データで計算してから表示範囲を`display_days`でスライスする設計にし、期間を短く絞ってもインジケータ序盤が不自然にならないようにしている（`render_chart()`内で計算→スライスの順序を徹底）
+- **休場日を詰めたチャート表示**（2026年10月追加）: 日付軸のままだと土日・祝日が空白として表示されるため、Plotlyの`rangebreaks`で表示範囲内のデータのない日をx軸から除外（`render_chart()`）。除外日は「表示範囲の全日付 − その銘柄のデータがある日」で算出するため、祝日カレンダーを別途持つ必要がなく、売買停止日も同時に詰められる。`fig.update_xaxes`で上段（ローソク足）・下段（RS）の両方に適用し、上下の日付位置を揃えている。x軸をカテゴリ型（日付を文字列ラベルとして並べる）にする案は、目盛りの自作が必要で上下段の対応も崩れやすいため不採用
 - **データ基準日の表示**（2026年9月追加）: タイトル直下に「データ基準日: YYYY-MM-DD（曜日）の終値」を表示し、どの日の終値に基づく結果かを分かるようにした（`data_as_of()`）。基準日は全銘柄の最新日ではなくベンチマーク`1306.T`の最新日を採用（一部銘柄に取引時間中の暫定値が混ざっても基準日がずれないようにし、RS計算の基準とも揃えるため）。日次ジョブの実行日時ではなくデータの日付を表示するのは、Streamlit Cloud上ではファイルの更新日時がリポジトリ取り込み時刻になり信頼できないため。データが古いままの場合の鮮度警告（例: 基準日が5日以上前なら`st.warning`）は今回は見送り（入れる場合は、GW・年末年始などの連休中に誤って警告が出る点への対処が必要）
 
 ## データ品質の問題と対応（ベンチマークの異常値）
@@ -122,7 +123,7 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **Streamlit Cloudとの連携**: ダッシュボードはGitHubリポジトリと連携してStreamlit Community Cloud上にデプロイ済み。ダッシュボードが参照するCSVはリポジトリ内のものなので、Mac miniで`daily_update.py`を実行した後は**git commit＆pushまで自動化する**必要がある（LaunchDaemonから呼ぶスクリプト内に組み込む想定）
 - **開発体制**（2026年9月27日変更）: データの取得・更新を常時稼働のMac miniで行うことになったため、開発もマシンごとに役割を分ける
   - **データ取得・スクリーニング系**（`daily_update.py`, `backfill_history.py`, `run_screening.py`, `run_golden_cross.py`, `filters.py`, `scripts/`）: Mac miniで開発する。実データ・実行環境（LaunchDaemon）がその場にあり検証しやすいため。MacBook Airで開発すると、動作確認が翌営業日18:00の定期実行を待つことになり効率が悪い
-  - **通知**（`notify.py`、手順12）: Mac miniで開発する。日次ジョブ（`scripts/daily_job.sh`）の末尾に組み込む想定で、実データでの送信テストもMac miniでしか行えないため
+  - **通知**（`notify.py`、手順12）: Mac miniで開発する。日次ジョブ（`scripts/daily_job.sh`）の末尾に組み込まれており、実データでの送信テストもMac miniでしか行えないため
   - **ダッシュボード**（`dashboard.py`）: MacBook Air・Mac miniのどちらで開発してもよい
   - マシン間の同期はGitHubの`develop`ブランチ経由で行う。Mac miniは平日毎日データ更新をpushするため、MacBook Airで作業を始める前には必ず`git pull`する。MacBook AirではデータCSV（`daily_ohlcv.csv`など）を編集・commitしない（競合を避けるため）
   - Mac miniでの開発時の注意: 日次ジョブは開発と同じ作業ツリーで動く。平日18:00の時点で`develop`以外のブランチにいたり、コードに未commitの変更があったりすると、意図しないブランチへのcommitや書きかけのコードの実行が起こりうる。18:00前後は`develop`にいて、コードの変更はcommit済みにしておく（`daily_job.sh`冒頭への安全チェック追加を検討中）
@@ -165,4 +166,4 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 
 ## 現在の進捗
 
-プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成（手動テストでcommit＆pushまで成功済み）、TCC回避のための`~/claude-work`への移動・`uv sync`・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。Discord Webhookによる日次通知（`notify.py`）も実装済み（詳細は「通知（Discord Webhook）」参照）。次の作業は、市場が開く2026-09-28(月)夕方の定期実行でデータ更新・commit＆push・Discord通知が正しく行われるかの確認（詳細は「定期実行の方針」参照）。開発はデータ取得系をMac mini、ダッシュボードはどちらでも行う体制に変更（「開発体制」参照）。月次ジョブの自動化は未着手。
+プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成（手動テストでcommit＆pushまで成功済み）、TCC回避のための`~/claude-work`への移動・`uv sync`・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。Discord Webhookによる日次通知（`notify.py`）も実装済み（詳細は「通知（Discord Webhook）」参照）。2026-09-28(月)から平日18:00の定期実行が稼働しており、データ更新・commit＆push・Discord通知の正常動作を確認済み。開発はデータ取得系をMac mini、ダッシュボードはどちらでも行う体制に変更（「開発体制」参照）。ダッシュボードにデータ基準日の表示・休場日を詰めたチャート表示を追加。残っている課題は、`daily_job.sh`冒頭への安全チェックの追加（「開発体制」参照）と月次ジョブの自動化。

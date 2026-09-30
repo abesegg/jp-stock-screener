@@ -75,8 +75,8 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
         low=ticker_data["low"],
         close=ticker_data["close"],
         name="株価",
-        increasing=dict(line_color="#66BB6A", fillcolor="#66BB6A"),
-        decreasing=dict(line_color="#EF5350", fillcolor="#EF5350"),
+        increasing=dict(line=dict(color="#66BB6A", width=1.2), fillcolor="#66BB6A"),
+        decreasing=dict(line=dict(color="#EF5350", width=1.2), fillcolor="#EF5350"),
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
@@ -123,8 +123,14 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
     ), row=2, col=1)
     fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
 
+    # 休場日（土日・祝日）や売買停止日を詰めて表示するため、データのない日をx軸から除外する
+    all_days = pd.date_range(ticker_data["date"].min(), ticker_data["date"].max())
+    missing_days = all_days.difference(ticker_data["date"])
+    fig.update_xaxes(rangebreaks=[dict(values=missing_days.strftime("%Y-%m-%d").tolist())])
+
     fig.update_layout(
         height=600,
+        boxgap=0.4,  # ローソク足の実体幅（日付間隔に対する隙間の割合。既定0.3）
         xaxis_rangeslider_visible=False,
         margin=dict(l=20, r=20, t=30, b=20),
         showlegend=False,

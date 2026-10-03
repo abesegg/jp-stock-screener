@@ -18,6 +18,7 @@ from pathlib import Path
 import pandas as pd
 
 BASE_DIR = Path(__file__).parent
+FAILED_FILE = "daily_failed_tickers.txt"
 MAX_LEN = 2000  # Discordの1メッセージの上限文字数
 MAX_ITEMS = 10  # 新規銘柄の表示件数の上限
 
@@ -34,14 +35,31 @@ def load_env():
     return env
 
 
-def read_csv_at(ref, filename):
-    """指定したgitコミット時点のCSVを読み込む（存在しなければ空のDataFrame）"""
+def git_show(ref, filename):
+    """指定したgitコミット時点のファイル内容を返す（存在しなければNone）"""
     result = subprocess.run(
         ["git", "show", f"{ref}:./{filename}"], cwd=BASE_DIR, capture_output=True
     )
-    if result.returncode != 0:
+    return result.stdout if result.returncode == 0 else None
+
+
+def read_csv_at(ref, filename):
+    """指定したgitコミット時点のCSVを読み込む（存在しなければ空のDataFrame）"""
+    content = git_show(ref, filename)
+    if content is None:
         return pd.DataFrame(columns=["ticker"])
-    return pd.read_csv(io.BytesIO(result.stdout))
+    return pd.read_csv(io.BytesIO(content))
+
+
+def read_missing_all(text):
+    """daily_failed_tickers.txtから「5日間すべて取得できず」の銘柄を取り出す"""
+    tickers, in_section = [], False
+    for line in text.splitlines():
+        if line.startswith("#"):
+            in_section = "5日間すべて" in line
+        elif in_section and line.strip():
+            tickers.append(line.strip())
+    return tickers
 
 
 def new_entries(filename, base):
@@ -74,6 +92,18 @@ def build_success_message(base, dashboard_url):
         gc_new,
         lambda r: f"・{r['ticker']} {r['銘柄名']}（{r['33業種区分']}）{r['cross_date']}",
     )
+    missing = read_missing_all((BASE_DIR / FAILED_FILE).read_text(encoding="utf-8"))
+    if missing:
+        previous = git_show(base, FAILED_FILE)
+        previous = read_missing_all(previous.decode("utf-8")) if previous else []
+        missing_new = [t for t in missing if t not in previous]
+        names = pd.read_csv(BASE_DIR / "universe.csv").set_index("ticker")["銘柄名"]
+        lines.append("")
+        lines.append(
+            f"⚠️ **5日間取得できない銘柄**: {len(missing)}銘柄（新規 {len(missing_new)}）"
+            "　上場廃止・売買停止の可能性"
+        )
+        lines += [f"・{t} {names.get(t, '')}" for t in missing_new[:MAX_ITEMS]]
     if dashboard_url:
         # <>で囲むとDiscordのリンクプレビューが表示されない
         lines += ["", f"<{dashboard_url}>"]

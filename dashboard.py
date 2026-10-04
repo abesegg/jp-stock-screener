@@ -3,13 +3,25 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from filters import BENCHMARK_TICKER, GOLDEN_CROSS_SHORT, RS_PERIOD, load_close_wide, relative_strength_series
+from filters import (
+    BENCHMARK_TICKER, GOLDEN_CROSS_SHORT, RS_PERIOD,
+    above_ema_wide, liquidity_passed_tickers, load_close_wide,
+    relative_strength_series, relative_strength_wide, sector_breadth,
+)
 
 st.set_page_config(page_title="日本株 スクリーニング", page_icon="📈", layout="wide")
 
 RS_RANKING_FILE = "rs_ranking.csv"
 GOLDEN_CROSS_FILE = "golden_cross.csv"
 OHLCV_FILE = "daily_ohlcv.csv"
+UNIVERSE_FILE = "universe.csv"
+
+BREADTH_METRICS = {
+    f"RSがプラス（対TOPIX {RS_PERIOD}営業日）": "rs",
+    "25EMAより上": 25,
+    "75EMAより上": 75,
+}
+SMALL_SECTOR = 10  # 銘柄数がこれ未満の業種は割合が振れやすいため※を付けて表示
 
 
 @st.cache_data(ttl=600)
@@ -30,6 +42,20 @@ def load_ohlcv():
 @st.cache_data(ttl=600)
 def load_close_wide_cached():
     return load_close_wide(OHLCV_FILE)
+
+
+@st.cache_data(ttl=600)
+def load_sector_breadth(metric):
+    # 流動性フィルタ通過銘柄（RSランキングと同じ母集団）で業種別の割合を計算する
+    close_wide = load_close_wide_cached()
+    tickers = [t for t in liquidity_passed_tickers() if t in close_wide.columns]
+    if metric == "rs":
+        rs = relative_strength_wide(close_wide)[tickers]
+        flags = (rs > 0).astype(float).where(rs.notna())
+    else:
+        flags = above_ema_wide(close_wide[tickers], metric)
+    sector_of = pd.read_csv(UNIVERSE_FILE).set_index("ticker")["33業種区分"]
+    return sector_breadth(flags, sector_of)
 
 
 def data_as_of(ohlcv):
@@ -165,6 +191,72 @@ def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days
         render_chart(selected_ticker, ohlcv, close_wide, key_prefix, display_days)
 
 
+def render_breadth_tab(display_days):
+    metric_label = st.radio("指標", list(BREADTH_METRICS), horizontal=True)
+    ratio, count = load_sector_breadth(BREADTH_METRICS[metric_label])
+    latest = ratio.index[-1]
+    overall = ratio.loc[latest, "全体"] * 100
+
+    latest_df = pd.DataFrame({"割合": ratio.loc[latest] * 100, "銘柄数": count.loc[latest]})
+    latest_df = latest_df.drop("全体").sort_values("割合")
+
+    col_bar, col_line = st.columns([1, 1])
+
+    with col_bar:
+        st.subheader(f"業種別（{latest:%Y-%m-%d}）")
+        fig = go.Figure(go.Bar(
+            x=latest_df["割合"], y=latest_df.index, orientation="h",
+            marker_color="#2196F3",
+            text=[
+                f"{r:.0f}%（<span style='color:#EF6C00'><b>{n}※</b></span>）" if n < SMALL_SECTOR else f"{r:.0f}%（{n}）"
+                for r, n in zip(latest_df["割合"], latest_df["銘柄数"])
+            ],
+            textposition="outside",
+            hovertemplate="%{y}: %{x:.1f}%<extra></extra>",
+        ))
+        fig.add_vline(x=overall, line_dash="dot", line_color="gray",
+                      annotation_text=f"全体 {overall:.1f}%", annotation_position="top")
+        fig.update_layout(
+            height=800, xaxis=dict(range=[0, 110], ticksuffix="%"),
+            margin=dict(l=20, r=20, t=30, b=20),
+        )
+        st.plotly_chart(fig, width="stretch", key="breadth_bar")
+        st.caption(f"（）内は銘柄数。※は銘柄数{SMALL_SECTOR}未満の業種（割合が振れやすい）")
+
+    with col_line:
+        st.subheader("推移")
+        # 指標を切り替えると選択肢の並び順が変わり選択がリセットされるため、選択中の業種を保持して引き継ぐ
+        options = ["全体"] + latest_df.index[::-1].tolist()
+        prev = st.session_state.get("breadth_sector", "全体")
+        sector = st.selectbox("業種", options, index=options.index(prev) if prev in options else 0)
+        st.session_state["breadth_sector"] = sector
+        series = ratio[sector] * 100
+        overall_series = ratio["全体"] * 100
+        if display_days is not None:
+            cutoff = series.index.max() - pd.Timedelta(days=display_days)
+            series = series[series.index >= cutoff]
+            overall_series = overall_series[overall_series.index >= cutoff]
+
+        fig = go.Figure()
+        if sector != "全体":
+            fig.add_trace(go.Scatter(
+                x=overall_series.index, y=overall_series, mode="lines", name="全体",
+                line=dict(color="gray", width=1, dash="dot"),
+            ))
+        fig.add_trace(go.Scatter(
+            x=series.index, y=series, mode="lines", name=sector,
+            line=dict(color="#2196F3", width=1.5),
+        ))
+        fig.add_hline(y=50, line_dash="dash", line_color="#BDBDBD", line_width=1)
+        fig.update_layout(
+            height=400, yaxis=dict(range=[0, 100], ticksuffix="%"),
+            margin=dict(l=20, r=20, t=30, b=20),
+            legend=dict(orientation="h", y=1.1),
+        )
+        st.plotly_chart(fig, width="stretch", key="breadth_line")
+        st.caption("75EMAはデータの先頭数か月が助走期間のため、「全期間」表示の序盤は参考値")
+
+
 st.title("📈 日本株 スクリーニング")
 
 with st.sidebar:
@@ -179,7 +271,7 @@ close_wide = load_close_wide_cached()
 as_of = data_as_of(ohlcv)
 st.caption(f"データ基準日: {as_of:%Y-%m-%d}（{'月火水木金土日'[as_of.weekday()]}）の終値")
 
-tab_rs, tab_golden = st.tabs(["RS上位", "ゴールデンクロス"])
+tab_rs, tab_golden, tab_breadth = st.tabs(["RS上位", "ゴールデンクロス", "業種別"])
 
 with tab_rs:
     ranking = load_ranking()
@@ -199,6 +291,10 @@ with tab_golden:
             columns={"33業種区分": "業種", "cross_date": "クロス日"}
         )
     render_screening_tab(display_df, "golden", ohlcv, close_wide, display_days)
+
+with tab_breadth:
+    st.caption("流動性フィルタ通過銘柄のうち、各条件を満たす銘柄の割合（業種別）")
+    render_breadth_tab(display_days)
 
 st.divider()
 st.caption(

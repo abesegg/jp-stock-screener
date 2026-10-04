@@ -70,3 +70,26 @@ def golden_cross_tickers(
         cross_dates[ticker] = cross_series[cross_series].index[-1]
 
     return cross_dates
+
+
+def relative_strength_wide(close_wide, benchmark_ticker=BENCHMARK_TICKER, period=RS_PERIOD):
+    # 全銘柄・全日付の相対強度（index=date, columns=ticker）
+    ret = close_wide / close_wide.shift(period) - 1
+    return ret.sub(ret[benchmark_ticker], axis=0)
+
+
+def above_ema_wide(close_wide, span):
+    # 終値がEMAより上なら1、下なら0（終値が欠損の日はNaN）
+    ema = close_wide.ewm(span=span, adjust=False).mean()
+    return (close_wide > ema).astype(float).where(close_wide.notna())
+
+
+def sector_breadth(flags_wide, sector_of):
+    # 条件を満たす銘柄の割合を業種・日付ごとに集計する（NaN=判定不可の銘柄は母数から除く）
+    # flags_wide: index=date, columns=ticker の1/0/NaN、sector_of: ticker→業種のSeries
+    sectors = sector_of.reindex(flags_wide.columns)
+    hit = flags_wide.T.groupby(sectors).sum().T
+    count = flags_wide.notna().T.groupby(sectors).sum().T
+    hit["全体"] = hit.sum(axis=1)
+    count["全体"] = count.sum(axis=1)
+    return hit / count, count

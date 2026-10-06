@@ -117,12 +117,19 @@ def build_failure_message(message):
     )
 
 
-def send(url, content):
+def send(url, content, mention_user_id=None):
+    # 自分宛てのメンションを付けるとアプリアイコンのバッジに数えられ、見落としにくくなる
+    if mention_user_id:
+        content = f"<@{mention_user_id}>\n{content}"
     if len(content) > MAX_LEN:
         content = content[: MAX_LEN - 1] + "…"
+    payload = {"content": content}
+    if mention_user_id:
+        # メンションの対象を自分だけに限定する
+        payload["allowed_mentions"] = {"users": [mention_user_id]}
     request = urllib.request.Request(
         url,
-        data=json.dumps({"content": content}).encode("utf-8"),
+        data=json.dumps(payload).encode("utf-8"),
         # User-Agent未指定だとDiscord側で拒否される場合があるため明示する
         headers={"Content-Type": "application/json", "User-Agent": "jp-stock-screener"},
     )
@@ -150,7 +157,7 @@ def main():
     url = env.get("DISCORD_WEBHOOK_URL")
     if not url:
         sys.exit(".envにDISCORD_WEBHOOK_URLが設定されていません")
-    send(url, content)
+    send(url, content, env.get("DISCORD_MENTION_USER_ID"))
     print("Discordに通知しました")
 
 

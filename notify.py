@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from jpx import download_jpx_list, list_date
+
 BASE_DIR = Path(__file__).parent
 FAILED_FILE = "daily_failed_tickers.txt"
 MAX_LEN = 2000  # Discordの1メッセージの上限文字数
@@ -76,6 +78,22 @@ def format_items(df, fmt):
     return lines
 
 
+def jpx_update_notice():
+    """JPXの一覧が手元より新しければ、月次更新を促す1行を返す（確認できなければNone）"""
+    try:
+        latest = list_date(download_jpx_list())
+        local = list_date(BASE_DIR / "data_j.xlsx")
+    except Exception as e:
+        print(f"JPX一覧の更新確認に失敗しました: {e}")
+        return None
+    if latest > local:
+        return (
+            f"📅 JPXの上場銘柄一覧が更新されています（{latest:%Y-%m-%d}時点、手元は{local:%Y-%m-%d}時点）。"
+            "月次更新を実行してください"
+        )
+    return None
+
+
 def build_success_message(base, dashboard_url):
     rs, rs_new = new_entries("rs_ranking.csv", base)
     gc, gc_new = new_entries("golden_cross.csv", base)
@@ -104,6 +122,9 @@ def build_success_message(base, dashboard_url):
             "　上場廃止・売買停止の可能性"
         )
         lines += [f"・{t} {names.get(t, '')}" for t in missing_new[:MAX_ITEMS]]
+    notice = jpx_update_notice()
+    if notice:
+        lines += ["", notice]
     if dashboard_url:
         # <>で囲むとDiscordのリンクプレビューが表示されない
         lines += ["", f"<{dashboard_url}>"]

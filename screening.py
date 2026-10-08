@@ -59,7 +59,7 @@ print(f"取得失敗: {len(failed_tickers)}銘柄")
 print(f"除外（流動性基準未達）: {result['除外'].sum()}銘柄")
 print("結果を screening_result.csv に保存しました")
 
-if failed_tickers:
-    with open("failed_tickers.txt", "w") as f:
-        f.write("\n".join(failed_tickers))
-    print("取得失敗銘柄を failed_tickers.txt に保存しました")
+# 失敗が0件の月も書き出し、前回の内容が残らないようにする
+with open("failed_tickers.txt", "w") as f:
+    f.write("\n".join(failed_tickers))
+print("取得失敗銘柄を failed_tickers.txt に保存しました")

@@ -200,6 +200,18 @@ def render_breadth_tab(display_days):
     latest_df = pd.DataFrame({"割合": ratio.loc[latest] * 100, "銘柄数": count.loc[latest]})
     latest_df = latest_df.drop("全体").sort_values("割合")
 
+    # 割合が50%を超えた業種の数（判定できる業種がない日はNaN）
+    sector_ratio = ratio.drop(columns="全体")
+    n_sectors = sector_ratio.notna().sum(axis=1)
+    above_half = (sector_ratio > 0.5).sum(axis=1)
+    above_share = (above_half / n_sectors.where(n_sectors > 0)) * 100
+
+    st.metric(
+        "割合50%超の業種",
+        f"{above_half.iloc[-1]} / {n_sectors.iloc[-1]}業種（{above_share.iloc[-1]:.0f}%）",
+        delta=f"{above_half.iloc[-1] - above_half.iloc[-2]:+d}業種（前日比）",
+    )
+
     col_bar, col_line = st.columns([1, 1])
 
     with col_bar:
@@ -212,13 +224,14 @@ def render_breadth_tab(display_days):
                 for r, n in zip(latest_df["割合"], latest_df["銘柄数"])
             ],
             textposition="outside",
+            cliponaxis=False,  # 100%付近のラベルが軸の範囲外にはみ出しても切り取らない
             hovertemplate="%{y}: %{x:.1f}%<extra></extra>",
         ))
         fig.add_vline(x=overall, line_dash="dot", line_color="gray",
                       annotation_text=f"全体 {overall:.1f}%", annotation_position="top")
         fig.update_layout(
             height=800, xaxis=dict(range=[0, 110], ticksuffix="%"),
-            margin=dict(l=20, r=20, t=30, b=20),
+            margin=dict(l=20, r=70, t=30, b=20),  # 右側にラベル用の余白を確保
         )
         st.plotly_chart(fig, width="stretch", key="breadth_bar")
         st.caption(f"（）内は銘柄数。※は銘柄数{SMALL_SECTOR}未満の業種（割合が振れやすい）")
@@ -236,20 +249,31 @@ def render_breadth_tab(display_days):
             cutoff = series.index.max() - pd.Timedelta(days=display_days)
             series = series[series.index >= cutoff]
             overall_series = overall_series[overall_series.index >= cutoff]
+            above_share = above_share[above_share.index >= cutoff]
 
-        fig = go.Figure()
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.7, 0.3], vertical_spacing=0.08,
+            subplot_titles=("", "割合50%超の業種（全業種に対する割合, %）"),
+        )
         if sector != "全体":
             fig.add_trace(go.Scatter(
                 x=overall_series.index, y=overall_series, mode="lines", name="全体",
                 line=dict(color="gray", width=1, dash="dot"),
-            ))
+            ), row=1, col=1)
         fig.add_trace(go.Scatter(
             x=series.index, y=series, mode="lines", name=sector,
             line=dict(color="#2196F3", width=1.5),
-        ))
-        fig.add_hline(y=50, line_dash="dash", line_color="#BDBDBD", line_width=1)
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=above_share.index, y=above_share, mode="lines", name="50%超の業種",
+            line=dict(color="#1f77b4", width=1.5), showlegend=False,
+        ), row=2, col=1)
+        for row in (1, 2):
+            fig.add_hline(y=50, line_dash="dash", line_color="#BDBDBD", line_width=1, row=row, col=1)
+            fig.update_yaxes(range=[0, 100], ticksuffix="%", row=row, col=1)
         fig.update_layout(
-            height=400, yaxis=dict(range=[0, 100], ticksuffix="%"),
+            height=550,
             margin=dict(l=20, r=20, t=30, b=20),
             legend=dict(orientation="h", y=1.1),
         )

@@ -9,11 +9,18 @@ from storage import append_dedup
 BATCH_SIZE = 200
 SLEEP_BETWEEN_BATCHES = 2
 BACKFILL_PERIOD = "1y"  # 週足表示・将来の長期EMA計算に十分な余裕を持たせる
+MIN_HISTORY_DAYS = 200  # 蓄積がこれ未満の銘柄をバックフィル対象にする（1年分は約245営業日）
 OHLCV_FILE = "daily_ohlcv.csv"
 FIELDS = ["Open", "High", "Low", "Close", "Volume"]
-BENCHMARK_TICKER = "1306.T"
 
-tickers = liquidity_passed_tickers() + [BENCHMARK_TICKER]
+# 流動性フィルタ通過銘柄のうち、蓄積が足りない銘柄だけを対象にする（月次更新で新たに通過した銘柄など）
+# ベンチマーク（1306.T）は日次で取得済みで、異常値を手動修正した日もあるため対象外
+counts = pd.read_csv(OHLCV_FILE, usecols=["ticker"])["ticker"].value_counts()
+tickers = [t for t in liquidity_passed_tickers() if counts.get(t, 0) < MIN_HISTORY_DAYS]
+if not tickers:
+    print(f"蓄積が{MIN_HISTORY_DAYS}日未満の銘柄はありません。バックフィル不要です。")
+    raise SystemExit
+
 batches = [tickers[i:i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
 
 frames, failed_tickers = [], []
@@ -44,10 +51,13 @@ for i, batch in enumerate(batches, start=1):
         time.sleep(SLEEP_BETWEEN_BATCHES)
 
 new_data = pd.concat(frames, ignore_index=True)
-combined = append_dedup(new_data, OHLCV_FILE, ["date", "ticker"])
+before = sum(counts)
+# 既存行（日次取得分・手動修正分）は上書きせず、足りない日付の行だけを追加する
+combined = append_dedup(new_data, OHLCV_FILE, ["date", "ticker"], keep="first")
 
 print(f"\nバックフィル対象: {len(tickers)}銘柄")
 print(f"取得行数: {len(new_data)}行")
+print(f"追加行数: {len(combined) - before}行")
 print(f"{OHLCV_FILE}: 累計{len(combined)}行")
 
 if failed_tickers:

@@ -239,10 +239,12 @@ def render_breadth_tab(display_days):
     with col_line:
         st.subheader("推移")
         # 指標を切り替えると選択肢の並び順が変わり選択がリセットされるため、選択中の業種を保持して引き継ぐ
+        # keyを指定するとウィジェットの同一性がkeyだけで決まり、並び順が変わっても選択が保持される
+        # （key無しでindexを毎回渡すと、indexの変化でIDが変わり、直後の選択が1回おきに無視されていた）
         options = ["全体"] + latest_df.index[::-1].tolist()
-        prev = st.session_state.get("breadth_sector", "全体")
-        sector = st.selectbox("業種", options, index=options.index(prev) if prev in options else 0)
-        st.session_state["breadth_sector"] = sector
+        if st.session_state.get("breadth_sector") not in options:
+            st.session_state["breadth_sector"] = "全体"
+        sector = st.selectbox("業種", options, key="breadth_sector")
         series = ratio[sector] * 100
         overall_series = ratio["全体"] * 100
         if display_days is not None:

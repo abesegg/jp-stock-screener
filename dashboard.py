@@ -318,7 +318,7 @@ with tab_rs:
     st.caption(f"流動性フィルタ通過後、TOPIX(1306.T)に対する相対強度(21営業日)の上位{len(ranking)}銘柄")
     display_df = ranking.copy()
     display_df["RS(%)"] = (display_df["relative_strength"] * 100).round(2)
-    display_df = display_df[["ticker", "銘柄名", "33業種区分", "RS(%)"]].rename(columns={"33業種区分": "業種"})
+    display_df = display_df[["33業種区分", "銘柄名", "ticker", "RS(%)"]].rename(columns={"33業種区分": "業種"})
     render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days, f"rs_top_{as_of:%Y%m%d}.txt")
 
 with tab_golden:
@@ -327,7 +327,7 @@ with tab_golden:
     if golden.empty:
         display_df = golden
     else:
-        display_df = golden[["ticker", "銘柄名", "33業種区分", "cross_date"]].rename(
+        display_df = golden[["33業種区分", "銘柄名", "ticker", "cross_date"]].rename(
             columns={"33業種区分": "業種", "cross_date": "クロス日"}
         )
     render_screening_tab(display_df, "golden", ohlcv, close_wide, display_days, f"golden_cross_{as_of:%Y%m%d}.txt")

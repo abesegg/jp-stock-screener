@@ -6,7 +6,7 @@ from plotly.subplots import make_subplots
 from filters import (
     BENCHMARK_TICKER, GOLDEN_CROSS_SHORT, RS_PERIOD,
     above_ema_wide, liquidity_passed_tickers, load_close_wide,
-    relative_strength_series, relative_strength_wide, sector_breadth,
+    relative_strength, relative_strength_series, relative_strength_wide, sector_breadth,
 )
 
 st.set_page_config(page_title="日本株 スクリーニング", page_icon="📈", layout="wide")
@@ -15,6 +15,9 @@ RS_RANKING_FILE = "rs_ranking.csv"
 GOLDEN_CROSS_FILE = "golden_cross.csv"
 OHLCV_FILE = "daily_ohlcv.csv"
 UNIVERSE_FILE = "universe.csv"
+SCREENING_RESULT_FILE = "screening_result.csv"
+JPX_LIST_FILE = "data_j.xlsx"
+SIZE_RANK = {"TOPIX Core30": 1, "TOPIX Large70": 2, "TOPIX Mid400": 3, "TOPIX Small 1": 4, "TOPIX Small 2": 5}
 
 BREADTH_METRICS = {
     f"RSがプラス（対TOPIX {RS_PERIOD}営業日）": "rs",
@@ -22,6 +25,7 @@ BREADTH_METRICS = {
     "75EMAより上": 75,
 }
 SMALL_SECTOR = 10  # 銘柄数がこれ未満の業種は割合が振れやすいため※を付けて表示
+CANDIDATE_COUNT = 9  # 業種内候補タブに並べる銘柄数（3列×3行）
 
 
 @st.cache_data(ttl=600)
@@ -58,12 +62,32 @@ def load_sector_breadth(metric):
     return sector_breadth(flags, sector_of)
 
 
+@st.cache_data(ttl=600)
+def load_sector_leaders():
+    # 業種ごとの代表銘柄: 流動性フィルタ通過銘柄のうち、JPXの規模区分が最上位の銘柄の中で10日中央値売買代金が最大の銘柄
+    # （業種別指数は時価総額加重のため、大型株を選ぶと業種全体の値動きに近くなる。規模区分のない新規上場・新コードは最下位扱い）
+    df = pd.read_csv(SCREENING_RESULT_FILE)
+    df = df[df["除外"] == False]
+    jpx = pd.read_excel(JPX_LIST_FILE, dtype={"コード": str})
+    size = jpx.assign(ticker=jpx["コード"] + ".T").set_index("ticker")["規模区分"]
+    df["規模区分"] = df["ticker"].map(size)
+    df["規模順"] = df["規模区分"].map(SIZE_RANK).fillna(len(SIZE_RANK) + 1)
+    df = df.sort_values(["規模順", "10日中央値売買代金"], ascending=[True, False])
+    return df.groupby("33業種区分").head(1).set_index("33業種区分")[["ticker", "銘柄名", "規模区分"]]
+
+
+@st.cache_data(ttl=600)
+def load_latest_rs():
+    # 流動性フィルタ通過銘柄の最新RS（RSの高い順。データ不足で計算できない銘柄は含まない）
+    return relative_strength(liquidity_passed_tickers(), load_close_wide_cached())
+
+
 def data_as_of(ohlcv):
     # スクリーニングの基準日（RS計算と揃えるためベンチマークの最新日を採用）
     return ohlcv.loc[ohlcv["ticker"] == BENCHMARK_TICKER, "date"].max()
 
 
-def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
+def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_rs=True, height=600, title=None):
     full_data = ohlcv[ohlcv["ticker"] == ticker].sort_values("date")
 
     if full_data.empty:
@@ -75,7 +99,8 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
     ema_short = full_data["close"].ewm(span=GOLDEN_CROSS_SHORT, adjust=False).mean()
     ema75 = full_data["close"].ewm(span=75, adjust=False).mean()
     rolling_std = full_data["close"].rolling(25).std()
-    rs_series = relative_strength_series(ticker, close_wide, BENCHMARK_TICKER, RS_PERIOD)
+    if show_rs:
+        rs_series = relative_strength_series(ticker, close_wide, BENCHMARK_TICKER, RS_PERIOD)
 
     if display_days is not None:
         cutoff = full_data["date"].max() - pd.Timedelta(days=display_days)
@@ -85,15 +110,19 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
         ema_short = ema_short[mask]
         ema75 = ema75[mask]
         rolling_std = rolling_std[mask]
-        rs_series = rs_series[rs_series.index >= cutoff]
+        if show_rs:
+            rs_series = rs_series[rs_series.index >= cutoff]
     else:
         ticker_data = full_data
 
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.8, 0.2], vertical_spacing=0.03,
-        subplot_titles=("", f"対TOPIX相対強度（{RS_PERIOD}営業日騰落率差, %）"),
-    )
+    if show_rs:
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.8, 0.2], vertical_spacing=0.03,
+            subplot_titles=("", f"対TOPIX相対強度（{RS_PERIOD}営業日騰落率差, %）"),
+        )
+    else:
+        fig = make_subplots(rows=1, cols=1)
     fig.add_trace(go.Candlestick(
         x=ticker_data["date"],
         open=ticker_data["open"],
@@ -140,14 +169,15 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
             showlegend=False,
         ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=rs_series.index,
-        y=rs_series.values * 100,
-        mode="lines",
-        name="RS(%)",
-        line=dict(color="#1f77b4"),
-    ), row=2, col=1)
-    fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
+    if show_rs:
+        fig.add_trace(go.Scatter(
+            x=rs_series.index,
+            y=rs_series.values * 100,
+            mode="lines",
+            name="RS(%)",
+            line=dict(color="#1f77b4"),
+        ), row=2, col=1)
+        fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
 
     # 休場日（土日・祝日）や売買停止日を詰めて表示するため、データのない日をx軸から除外する
     all_days = pd.date_range(ticker_data["date"].min(), ticker_data["date"].max())
@@ -155,12 +185,14 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
     fig.update_xaxes(rangebreaks=[dict(values=missing_days.strftime("%Y-%m-%d").tolist())])
 
     fig.update_layout(
-        height=600,
+        height=height,
         boxgap=0.4,  # ローソク足の実体幅（日付間隔に対する隙間の割合。既定0.3）
         xaxis_rangeslider_visible=False,
-        margin=dict(l=20, r=20, t=30, b=20),
+        margin=dict(l=20, r=20, t=60 if title else 30, b=20),
         showlegend=False,
     )
+    if title:
+        fig.update_layout(title=dict(text=title, font=dict(size=12)))
     st.plotly_chart(fig, width="stretch", key=f"chart_{key_prefix}")
 
 
@@ -258,7 +290,7 @@ def render_breadth_tab(display_days):
         options = ["全体"] + latest_df.index[::-1].tolist()
         if st.session_state.get("breadth_sector") not in options:
             st.session_state["breadth_sector"] = "全体"
-        sector = st.selectbox("業種", options, key="breadth_sector")
+        sector = st.selectbox("業種", options, key="breadth_sector", filter_mode=None)
         series = ratio[sector] * 100
         overall_series = ratio["全体"] * 100
         if display_days is not None:
@@ -297,12 +329,55 @@ def render_breadth_tab(display_days):
         st.caption("75EMAはデータの先頭数か月が助走期間のため、「全期間」表示の序盤は参考値")
 
 
+def render_sector_overview_tab(ohlcv, close_wide, display_days):
+    leaders = load_sector_leaders()
+    ratio, _ = load_sector_breadth("rs")
+    latest = ratio.iloc[-1].drop("全体")
+    sectors = [s for s in latest.sort_values(ascending=False).index if s in leaders.index]
+
+    # 3列ずつ行を分けて並べる（行ごとにst.columnsを作り、チャートの高さを行内で揃える）
+    for row_start in range(0, len(sectors), 3):
+        cols = st.columns(3)
+        for col, sector in zip(cols, sectors[row_start:row_start + 3]):
+            leader = leaders.loc[sector]
+            with col:
+                render_chart(
+                    leader["ticker"], ohlcv, close_wide, f"overview_{sector}", display_days,
+                    show_rs=False, height=280,
+                    title=f"<b>{sector}</b>（RSプラス {latest[sector] * 100:.0f}%）<br>"
+                          f"{leader['銘柄名']}（{leader['ticker']}・{str(leader['規模区分']).replace('TOPIX ', '')}）",
+                )
+
+
+def render_sector_candidates_tab(ohlcv, close_wide, display_days):
+    ratio, _ = load_sector_breadth("rs")
+    sectors = ratio.iloc[-1].drop("全体").sort_values(ascending=False).index.tolist()
+    sector = st.selectbox("業種（RSがプラスの割合が高い順）", sectors, key="candidate_sector", filter_mode=None)
+
+    universe = pd.read_csv(UNIVERSE_FILE).set_index("ticker")
+    df = load_latest_rs().rename("rs").to_frame().join(universe[["銘柄名", "33業種区分"]])
+    df = df[df["33業種区分"] == sector]
+    st.caption(f"{sector}: RSを計算できた{len(df)}銘柄のうち、RS上位{min(len(df), CANDIDATE_COUNT)}銘柄")
+    top = df.head(CANDIDATE_COUNT)
+
+    for row_start in range(0, len(top), 3):
+        cols = st.columns(3)
+        for col, (ticker, row) in zip(cols, top.iloc[row_start:row_start + 3].iterrows()):
+            with col:
+                render_chart(
+                    ticker, ohlcv, close_wide, f"candidate_{ticker}", display_days,
+                    show_rs=False, height=280,
+                    title=f"<b>{row['銘柄名']}</b>（{ticker}）<br>RS {row['rs'] * 100:+.1f}%",
+                )
+
+
 st.title("📈 日本株 スクリーニング")
 
 with st.sidebar:
     st.subheader("表示設定")
     period_map = {"1ヶ月": 30, "3ヶ月": 90, "6ヶ月": 180, "1年": 365, "全期間": None}
-    period_label = st.selectbox("チャート表示期間", list(period_map.keys()), index=2)
+    # 選択ボックスはいずれも文字入力による絞り込みを無効にする（入力は想定せず、カーソルの点滅が気になるため）
+    period_label = st.selectbox("チャート表示期間", list(period_map.keys()), index=2, filter_mode=None)
     display_days = period_map[period_label]
 
 ohlcv = load_ohlcv()
@@ -311,30 +386,46 @@ close_wide = load_close_wide_cached()
 as_of = data_as_of(ohlcv)
 st.caption(f"データ基準日: {as_of:%Y-%m-%d}（{'月火水木金土日'[as_of.weekday()]}）の終値")
 
-tab_rs, tab_golden, tab_breadth = st.tabs(["RS上位", "ゴールデンクロス", "業種別"])
+# 選択中のタブだけを実行する（既定では全タブを毎回描画するため、チャートの多いタブを足すと全操作が重くなる）
+tab_rs, tab_golden, tab_breadth, tab_overview, tab_candidates = st.tabs(
+    ["RS上位", "ゴールデンクロス", "業種別", "業種俯瞰", "業種内候補"], key="main_tab", on_change="rerun"
+)
 
-with tab_rs:
-    ranking = load_ranking()
-    st.caption(f"流動性フィルタ通過後、TOPIX(1306.T)に対する相対強度(21営業日)の上位{len(ranking)}銘柄")
-    display_df = ranking.copy()
-    display_df["RS(%)"] = (display_df["relative_strength"] * 100).round(2)
-    display_df = display_df[["33業種区分", "銘柄名", "ticker", "RS(%)"]].rename(columns={"33業種区分": "業種"})
-    render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days, f"rs_top_{as_of:%Y%m%d}.txt")
+if tab_rs.open:
+    with tab_rs:
+        ranking = load_ranking()
+        st.caption(f"流動性フィルタ通過後、TOPIX(1306.T)に対する相対強度(21営業日)の上位{len(ranking)}銘柄")
+        display_df = ranking.copy()
+        display_df["RS(%)"] = (display_df["relative_strength"] * 100).round(2)
+        display_df = display_df[["33業種区分", "銘柄名", "ticker", "RS(%)"]].rename(columns={"33業種区分": "業種"})
+        render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days, f"rs_top_{as_of:%Y%m%d}.txt")
 
-with tab_golden:
-    golden = load_golden_cross()
-    st.caption(f"流動性フィルタ通過銘柄のうち、{GOLDEN_CROSS_SHORT}EMAが25EMAを直近3営業日以内に下から上に抜けた{len(golden)}銘柄")
-    if golden.empty:
-        display_df = golden
-    else:
-        display_df = golden[["33業種区分", "銘柄名", "ticker", "cross_date"]].rename(
-            columns={"33業種区分": "業種", "cross_date": "クロス日"}
-        )
-    render_screening_tab(display_df, "golden", ohlcv, close_wide, display_days, f"golden_cross_{as_of:%Y%m%d}.txt")
+if tab_golden.open:
+    with tab_golden:
+        golden = load_golden_cross()
+        st.caption(f"流動性フィルタ通過銘柄のうち、{GOLDEN_CROSS_SHORT}EMAが25EMAを直近3営業日以内に下から上に抜けた{len(golden)}銘柄")
+        if golden.empty:
+            display_df = golden
+        else:
+            display_df = golden[["33業種区分", "銘柄名", "ticker", "cross_date"]].rename(
+                columns={"33業種区分": "業種", "cross_date": "クロス日"}
+            )
+        render_screening_tab(display_df, "golden", ohlcv, close_wide, display_days, f"golden_cross_{as_of:%Y%m%d}.txt")
 
-with tab_breadth:
-    st.caption("流動性フィルタ通過銘柄のうち、各条件を満たす銘柄の割合（業種別）")
-    render_breadth_tab(display_days)
+if tab_breadth.open:
+    with tab_breadth:
+        st.caption("流動性フィルタ通過銘柄のうち、各条件を満たす銘柄の割合（業種別）")
+        render_breadth_tab(display_days)
+
+if tab_overview.open:
+    with tab_overview:
+        st.caption("業種ごとの代表銘柄（JPXの規模区分が最上位の銘柄のうち売買代金が最大）の日足。業種別タブの「RSがプラス」の割合が高い順")
+        render_sector_overview_tab(ohlcv, close_wide, display_days)
+
+if tab_candidates.open:
+    with tab_candidates:
+        st.caption("選択した業種の流動性フィルタ通過銘柄を、TOPIXに対する相対強度（21営業日）の高い順に表示")
+        render_sector_candidates_tab(ohlcv, close_wide, display_days)
 
 st.divider()
 st.caption(

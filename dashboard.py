@@ -164,7 +164,12 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None):
     st.plotly_chart(fig, width="stretch", key=f"chart_{key_prefix}")
 
 
-def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days):
+def to_tradingview_watchlist(tickers):
+    # TradingViewのウォッチリストにインポートできる形式（"TSE:7203,TSE:6758,..."）
+    return ",".join(f"TSE:{t.removesuffix('.T')}" for t in tickers)
+
+
+def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days, download_name):
     if display_df.empty:
         st.info("該当する銘柄はありません")
         return
@@ -185,6 +190,15 @@ def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days
         selected_rows = event.selection.rows if event and event.selection else []
         selected_idx = selected_rows[0] if selected_rows else 0
         selected_ticker = display_df.iloc[selected_idx]["ticker"]
+
+        st.download_button(
+            "TradingView用リストをダウンロード",
+            data=to_tradingview_watchlist(display_df["ticker"]),
+            file_name=download_name,
+            mime="text/plain",
+            on_click="ignore",  # ダウンロード時にアプリを再実行しない（選択中の銘柄などを保つ）
+            key=f"download_{key_prefix}",
+        )
 
     with col_chart:
         st.subheader("日足チャート")
@@ -305,7 +319,7 @@ with tab_rs:
     display_df = ranking.copy()
     display_df["RS(%)"] = (display_df["relative_strength"] * 100).round(2)
     display_df = display_df[["ticker", "銘柄名", "33業種区分", "RS(%)"]].rename(columns={"33業種区分": "業種"})
-    render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days)
+    render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days, f"rs_top_{as_of:%Y%m%d}.txt")
 
 with tab_golden:
     golden = load_golden_cross()
@@ -316,7 +330,7 @@ with tab_golden:
         display_df = golden[["ticker", "銘柄名", "33業種区分", "cross_date"]].rename(
             columns={"33業種区分": "業種", "cross_date": "クロス日"}
         )
-    render_screening_tab(display_df, "golden", ohlcv, close_wide, display_days)
+    render_screening_tab(display_df, "golden", ohlcv, close_wide, display_days, f"golden_cross_{as_of:%Y%m%d}.txt")
 
 with tab_breadth:
     st.caption("流動性フィルタ通過銘柄のうち、各条件を満たす銘柄の割合（業種別）")

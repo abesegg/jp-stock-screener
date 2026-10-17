@@ -99,7 +99,7 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **関連する関数**: `perfect_order_wide()`（パーフェクトオーダーの成立有無）、`fresh_perfect_order_wide()`（新規成立日）。定義は`analysis/signal_study.py`の「PO新規+RSプラス」と同じ
 - **対象母集団**: 流動性フィルタ通過銘柄。銘柄ごとにデータ開始から63営業日（`EMA_WARMUP_DAYS`）はEMAの助走期間として判定しない（過去データの短い新規通過銘柄は、データが貯まるまで対象外）
 - **検出範囲**: 直近5営業日以内（`PO_LOOKBACK`）。新規成立は1日約8件のため、ゴールデンクロスの3日より広げている
-- **出力**: CSVや日次ジョブは使わず、ダッシュボードの「PO転換」タブで毎回計算して表示する（`load_perfect_order()`）。Discord通知に載せる場合は、Mac miniで日次ジョブに組み込む
+- **出力**: 日次ジョブで`run_perfect_order.py`が`perfect_order.csv`（列は`ticker, po_date, relative_strength, 銘柄名, 33業種区分`。`relative_strength`は最新のRS）を書き出し、Discord通知に使う（2026-10-17追加）。該当0件の日もヘッダー行だけのCSVを書き出す。ダッシュボードの「PO転換」タブはCSVを使わず毎回計算して表示する（`load_perfect_order()`。同じ関数で判定するため結果は一致する）
 - **ダッシュボードでの位置**: 優先的に見たいためゴールデンクロスの左に配置。ゴールデンクロスのタブは当面見比べのために残す
 
 ## ダッシュボード（`dashboard.py`）
@@ -188,7 +188,7 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
   - Claude Codeのセッション履歴はマシンごとに独立しており引き継がれないため、このREADME.mdがマシン間・セッション間の引き継ぎの起点になる
 - **Mac mini側のセットアップ状況**（2026年9月27日時点）
   - `uv`を公式インストーラで導入（`~/.local/bin/uv`）し、`uv sync`で環境構築済み。gitのユーザーはリポジトリローカルに`abesegg <abe.segg@gmail.com>`を設定済み。push用のSSH鍵は`~/.ssh/id_ed25519`（個人鍵・パスフレーズなし）。リポジトリ専用のDeploy keyへの切り替えは保留中
-  - `scripts/daily_job.sh`: LaunchDaemonから呼ばれる日次ジョブ。`git pull --rebase` → `daily_update.py` → `run_screening.py` → `run_golden_cross.py` → 変更があれば`develop`へcommit＆push → Discordへ結果を通知。途中で失敗した場合はcommitしない（`set -e`）。LaunchDaemonは環境変数が最小限のため、`HOME`・`PATH`をスクリプト内で明示的に設定している
+  - `scripts/daily_job.sh`: LaunchDaemonから呼ばれる日次ジョブ。`git pull --rebase` → `daily_update.py` → `run_screening.py` → `run_golden_cross.py` → `run_perfect_order.py` → 変更があれば`develop`へcommit＆push → Discordへ結果を通知。途中で失敗した場合はcommitしない（`set -e`）。LaunchDaemonは環境変数が最小限のため、`HOME`・`PATH`をスクリプト内で明示的に設定している
   - `scripts/com.abesegg.jp-stock-screener.daily.plist`: 平日（月〜金）18:00に上記を実行。ログは`logs/daily_job.log`（git管理外）
   - **`~/Documents`の外への移動**: 当初は`~/Documents/claude-work`に置いていたが、macOSのプライバシー保護（TCC）によりLaunchDaemonから`~/Documents`配下にアクセスできず、`posix_spawn(/bin/bash) ... Operation not permitted`（exit code 78: EX_CONFIG）で起動に失敗した。`/bin/bash`へのフルディスクアクセス付与は影響範囲が広すぎるため見送り、`claude-work`ごと`~/claude-work`へ移動する方針とした（移動後は`.venv`内の絶対パスが壊れるため`uv sync`で再作成する）。移動・`uv sync --reinstall`（`.venv`内に旧パスが残っていたため）・LaunchDaemon再登録を実施し、`kickstart`での手動実行が正常終了（exit code 0）したことを確認済み（2026年9月27日）
   - 登録・解除・手動実行・状態確認のコマンド（plistを変更した場合は`bootout` → `cp` → `bootstrap`で再登録する）:
@@ -207,7 +207,7 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 日次ジョブの結果をDiscordへ通知する（`notify.py`、2026年9月追加）。
 
 - **方式の選択**: Discordプラグイン（Claude Codeのチャンネル機能）はClaude Codeセッションの起動中しか動かず、LaunchDaemonからの無人実行には向かないため、Discord Webhookへ直接POSTする方式を採用。標準ライブラリ（`urllib`）のみで実装し依存関係の追加なし
-- **成功時**: RS上位・ゴールデンクロスそれぞれの総数と、前回から**新規に入った銘柄**（各最大10件、超過分は「…ほか○銘柄」）、ダッシュボードのリンク（`<>`で囲みリンクプレビューを抑止）を通知。あわせてJPXの上場銘柄一覧（`jpx.py`）をダウンロードして基準日を手元の`data_j.xlsx`と比べ、新しければ月次更新を促す1行を加える（月次更新するまで毎日表示。JPXにアクセスできない場合は1行を省いて通常どおり通知）
+- **成功時**: RS上位・PO転換それぞれの総数と、前回から**新規に入った銘柄**（各最大10件、超過分は「…ほか○銘柄」）、ダッシュボードのリンク（`<>`で囲みリンクプレビューを抑止）を通知。あわせてJPXの上場銘柄一覧（`jpx.py`）をダウンロードして基準日を手元の`data_j.xlsx`と比べ、新しければ月次更新を促す1行を加える（月次更新するまで毎日表示。JPXにアクセスできない場合は1行を省いて通常どおり通知）
 - **新規判定**: `daily_job.sh`が`git pull`直後のcommitを`BASE_REF`として記録し、そのcommit時点のCSV（`git show`）と今回のCSVを比較。前日の結果はcommit済みなので別途状態ファイルを持つ必要がない
 - **失敗時**: `trap ERR`で失敗した行番号とexit codeを通知。通知自体の失敗ではジョブを失敗扱いにしない（`|| true`）
 - **設定**: Webhook URLとダッシュボードURLは`.env`（git管理外、権限600）に記載。GitHubにpushしているリポジトリのため、URLをコードに書かない
@@ -219,17 +219,20 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **動作確認**: `uv run python notify.py success --base <git ref> --dry-run`で送信せずに通知文を表示できる
 - **1メッセージの文字数**: Discordの上限（2000文字）を超える場合は切り詰める（通常は700文字程度）
 - **スマホに通知が届かない件**（2026年10月7日解決）: 実際にはスマホに通知は届いていたが、Discordのアプリアイコンのバッジは自分宛てのメンションとDMしか数えないため、Webhookの投稿ではバッジが付かず見落としていた。対策として、`.env`に`DISCORD_MENTION_USER_ID`（自分のDiscordユーザーID）を設定すると通知の先頭に自分宛てのメンションを付けるようにした（`allowed_mentions`で対象を自分だけに限定）。未設定ならメンションなしで送信する。テスト送信でバッジが付くことを確認済み（調査の過程で、iOSの集中モード・時刻指定要約、ブラウザでのDiscord表示中のプッシュ抑止は原因でないことを確認）
-- **今後の作業: 通知のゴールデンクロスをPO転換に置き換える**（2026-10-17決定、未着手。日次ジョブを変えるため「開発体制」に従いMac miniで行う）
+- **通知のゴールデンクロスをPO転換に置き換え**（2026-10-17実施、Mac miniで作業）
   - **背景**: 過去データの検証で、ゴールデンクロスは初動を捉える効果がほとんどなく、パーフェクトオーダーの新規転換（PO転換）の方が有効だった（「シグナルの検証（`analysis/`）」参照）。ダッシュボードには「PO転換」タブを実装済み（2026-10-17）。通知もPO転換を見たい
   - **方針**: 通知の「ゴールデンクロス」の部分だけをPO転換に置き換える。`run_golden_cross.py`・`golden_cross.csv`・ダッシュボードのゴールデンクロスのタブは当面残す（廃止するかは使ってみて判断）。ダッシュボードのPO転換タブは毎回計算する今の作りのままでよい（`perfect_order.csv`と同じ関数で判定するため結果は一致する）
-  - **手順**:
+  - **通知の書式**: 見出しは`**PO転換**: {件数}銘柄（新規 {新規件数}）`、各行は`・{ticker} {銘柄名}（{33業種区分}）{po_date} RS {relative_strength:+.1%}`。最新日の終値が未反映の銘柄はRSが計算できず空欄になるため、`RS -`と表示する（`notify.py`の`format_rs()`。ダッシュボードのPO転換タブでも同様に空欄になる）
+  - **確認結果**（2026-10-17、データ基準日2026-10-16）: `run_perfect_order.py`で40銘柄を検出し、ダッシュボードの`load_perfect_order()`と同じ処理の結果と件数・銘柄・並び順が一致。0件時にヘッダー行だけのCSVになること、`--dry-run`の通知文、Discordへのテスト送信（先頭に「テスト送信」の1行を付けて手動送信）で表示に問題がないことを確認
+  - **初回の「新規」の扱い**: 実施日に`perfect_order.csv`もcommitしたため、2026-10-19(月)の日次ジョブから、その日に新しく成立した銘柄だけが「新規」として通知される見込み（commitしていなければ初回は全件が新規になっていた）
+  - **実施した手順**（記録として残す）:
     1. 作業前にMac miniで`git pull`する（判定の関数はMacBook Airで`filters.py`に追加済み）
     2. `run_perfect_order.py`を新規作成する。`run_golden_cross.py`と同じ形で、判定に`filters.py`の`fresh_perfect_order_tickers(tickers, close_wide)`（戻り値は`{ticker: 成立日}`、直近`PO_LOOKBACK`=5営業日の新規成立かつ成立日のRSがプラス）を使う。出力は`perfect_order.csv`で、列は`ticker, po_date, relative_strength, 銘柄名, 33業種区分`。`po_date`は`%Y-%m-%d`の文字列、`relative_strength`は最新のRS（`filters.py`の`relative_strength(tickers, close_wide)`の値。ダッシュボードの`load_latest_rs()`と同じ）、銘柄名・業種は`universe.csv`から付ける。並びは`po_date`の新しい順、同日は`relative_strength`の高い順（ダッシュボードの`load_perfect_order()`と同じ）。該当0件の日もヘッダー行だけのCSVを書き出す（`notify.py`が読めるように）。`run_golden_cross.py`は該当0件だと列のない空のDataFrameを書き出すため、ヘッダーのない空ファイルになる。同じ書き方をまねず、`pd.DataFrame(rows, columns=["ticker", "po_date", "relative_strength", "銘柄名", "33業種区分"])`のように列名を明示する
     3. `scripts/daily_job.sh`: `uv run python run_golden_cross.py`の次の行に`uv run python run_perfect_order.py`を足し、`git add`の対象に`perfect_order.csv`を加える
     4. `notify.py`の`build_success_message()`: ゴールデンクロスの部分（`new_entries("golden_cross.csv", base)`とその表示）を`perfect_order.csv`に置き換える。見出しは`**PO転換**: {件数}銘柄（新規 {新規件数}）`、各行は`・{ticker} {銘柄名}（{33業種区分}）{po_date} RS {relative_strength:+.1%}`（RS上位の行と同じ書式）。新規の判定（`new_entries()`）と表示件数の上限（`MAX_ITEMS`=10）は既存の仕組みをそのまま使う
     5. 確認: `uv run python run_perfect_order.py`で`perfect_order.csv`を作り、`uv run python notify.py success --base HEAD --dry-run`で通知文を確認する（送信はしない）。ダッシュボードのPO転換タブと銘柄数・銘柄が一致することも確認する
     6. commit＆pushし、READMEを更新する（この「今後の作業」の項目、上の「成功時」の項目、「スクリーニング条件（パーフェクトオーダー転換・初動検知）」の「出力」の項目）
-  - **注意**: 導入した日の初回だけは、比較元（前回のcommit）に`perfect_order.csv`がないため全件（約40銘柄）が「新規」になる（表示は10件まで、残りは「…ほか○銘柄」）。2日目からは、その日に新しく成立した銘柄（1日約8件）だけが新規になる見込み。PO転換の銘柄は成立から5営業日リストに残るため、同じ銘柄が新規として通知されるのは成立日の1回だけ
+  - **注意**: 新規になるのはその日に新しく成立した銘柄（1日約8件）だけの見込み。PO転換の銘柄は成立から5営業日リストに残るため、同じ銘柄が新規として通知されるのは成立日の1回だけ
 
 ## 検討して見送った代替案
 
@@ -237,4 +240,4 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 
 ## 現在の進捗
 
-プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成（手動テストでcommit＆pushまで成功済み）、TCC回避のための`~/claude-work`への移動・`uv sync`・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。Discord Webhookによる日次通知（`notify.py`）も実装済み（詳細は「通知（Discord Webhook）」参照）。2026-09-28(月)から平日18:00の定期実行が稼働しており、データ更新・commit＆push・Discord通知の正常動作を確認済み。開発はデータ取得系をMac mini、ダッシュボードはどちらでも行う体制に変更（「開発体制」参照）。ダッシュボードにデータ基準日の表示・休場日を詰めたチャート表示・業種別タブ（RSプラス／25EMA・75EMAより上の銘柄の割合、割合50%超の業種数）・TradingView用リストのダウンロード・業種俯瞰タブ（業種ごとの代表銘柄のミニチャート）・業種内候補タブ（業種内のRS上位銘柄のミニチャート）を追加。初動シグナルの検証の仕組み（`analysis/`）を作り、パーフェクトオーダーへの新規転換がゴールデンクロスより有効なことを確認し、ダッシュボードにPO転換タブを追加。日次取得の失敗を2分類して上場廃止などをDiscordで警告するようにし、2026-10-09に銘柄マスタを9月末の一覧で更新（持株会社化した642A・640Aは手動追加、「データ品質の問題と対応（取得失敗の急増と銘柄入れ替え）」参照）。残っている課題は、`daily_job.sh`冒頭への安全チェックの追加（「開発体制」参照）、月次ジョブの自動化、9月末からデータが止まっている9銘柄の原因確認。
+プロジェクト初期化・依存関係導入・株価取得（`main.py`）・流動性フィルタ（`screening.py`）・100銘柄への拡大（`tickers.py`）・東証全銘柄への拡大とローカルCSV出力（`fetch_universe.py`, `universe.csv`, `screening_result.csv`）・日次OHLCV蓄積（`daily_update.py`, `daily_ohlcv.csv`）・TOPIX相対強度スクリーニング（`filters.py`, `run_screening.py`, `backfill_history.py`, `rs_ranking.csv`）・ゴールデンクロススクリーニング（`run_golden_cross.py`, `golden_cross.csv`）・閲覧用ダッシュボード（`dashboard.py`）・ダッシュボードのStreamlit Community Cloudデプロイ・定期実行方式の決定（Mac miniの`LaunchDaemon`）まで完了。Mac mini側のセットアップは`uv`導入・`uv sync`・日次ジョブのスクリプト（`scripts/daily_job.sh`）とplistの作成（手動テストでcommit＆pushまで成功済み）、TCC回避のための`~/claude-work`への移動・`uv sync`・LaunchDaemonの再登録・`kickstart`での手動実行まで完了。Discord Webhookによる日次通知（`notify.py`）も実装済み（詳細は「通知（Discord Webhook）」参照）。2026-09-28(月)から平日18:00の定期実行が稼働しており、データ更新・commit＆push・Discord通知の正常動作を確認済み。開発はデータ取得系をMac mini、ダッシュボードはどちらでも行う体制に変更（「開発体制」参照）。ダッシュボードにデータ基準日の表示・休場日を詰めたチャート表示・業種別タブ（RSプラス／25EMA・75EMAより上の銘柄の割合、割合50%超の業種数）・TradingView用リストのダウンロード・業種俯瞰タブ（業種ごとの代表銘柄のミニチャート）・業種内候補タブ（業種内のRS上位銘柄のミニチャート）を追加。初動シグナルの検証の仕組み（`analysis/`）を作り、パーフェクトオーダーへの新規転換がゴールデンクロスより有効なことを確認し、ダッシュボードにPO転換タブを追加、Discord通知もゴールデンクロスからPO転換に置き換え（`run_perfect_order.py`, `perfect_order.csv`）。日次取得の失敗を2分類して上場廃止などをDiscordで警告するようにし、2026-10-09に銘柄マスタを9月末の一覧で更新（持株会社化した642A・640Aは手動追加、「データ品質の問題と対応（取得失敗の急増と銘柄入れ替え）」参照）。残っている課題は、`daily_job.sh`冒頭への安全チェックの追加（「開発体制」参照）、月次ジョブの自動化、9月末からデータが止まっている9銘柄の原因確認。

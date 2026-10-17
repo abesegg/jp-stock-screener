@@ -78,6 +78,11 @@ def format_items(df, fmt):
     return lines
 
 
+def format_rs(value):
+    # 最新日の終値が未反映の銘柄はRSを計算できず空欄になるため「-」と表示する
+    return f"RS {value:+.1%}" if pd.notna(value) else "RS -"
+
+
 def jpx_update_notice():
     """JPXの一覧が手元より新しければ、月次更新を促す1行を返す（確認できなければNone）"""
     try:
@@ -96,7 +101,7 @@ def jpx_update_notice():
 
 def build_success_message(base, dashboard_url):
     rs, rs_new = new_entries("rs_ranking.csv", base)
-    gc, gc_new = new_entries("golden_cross.csv", base)
+    po, po_new = new_entries("perfect_order.csv", base)
 
     lines = [f"✅ 日次スクリーニング完了（{date.today():%Y-%m-%d}）", ""]
     lines.append(f"**RS上位10%**: {len(rs)}銘柄（新規 {len(rs_new)}）")
@@ -105,10 +110,10 @@ def build_success_message(base, dashboard_url):
         lambda r: f"・{r['ticker']} {r['銘柄名']}（{r['33業種区分']}）RS {r['relative_strength']:+.1%}",
     )
     lines.append("")
-    lines.append(f"**ゴールデンクロス**: {len(gc)}銘柄（新規 {len(gc_new)}）")
+    lines.append(f"**PO転換**: {len(po)}銘柄（新規 {len(po_new)}）")
     lines += format_items(
-        gc_new,
-        lambda r: f"・{r['ticker']} {r['銘柄名']}（{r['33業種区分']}）{r['cross_date']}",
+        po_new,
+        lambda r: f"・{r['ticker']} {r['銘柄名']}（{r['33業種区分']}）{r['po_date']} {format_rs(r['relative_strength'])}",
     )
     missing = read_missing_all((BASE_DIR / FAILED_FILE).read_text(encoding="utf-8"))
     if missing:

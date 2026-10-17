@@ -219,6 +219,17 @@ RSが「今強い銘柄」を捉えるのに対し、「上昇に転換した初
 - **動作確認**: `uv run python notify.py success --base <git ref> --dry-run`で送信せずに通知文を表示できる
 - **1メッセージの文字数**: Discordの上限（2000文字）を超える場合は切り詰める（通常は700文字程度）
 - **スマホに通知が届かない件**（2026年10月7日解決）: 実際にはスマホに通知は届いていたが、Discordのアプリアイコンのバッジは自分宛てのメンションとDMしか数えないため、Webhookの投稿ではバッジが付かず見落としていた。対策として、`.env`に`DISCORD_MENTION_USER_ID`（自分のDiscordユーザーID）を設定すると通知の先頭に自分宛てのメンションを付けるようにした（`allowed_mentions`で対象を自分だけに限定）。未設定ならメンションなしで送信する。テスト送信でバッジが付くことを確認済み（調査の過程で、iOSの集中モード・時刻指定要約、ブラウザでのDiscord表示中のプッシュ抑止は原因でないことを確認）
+- **今後の作業: 通知のゴールデンクロスをPO転換に置き換える**（2026-10-17決定、未着手。日次ジョブを変えるため「開発体制」に従いMac miniで行う）
+  - **背景**: 過去データの検証で、ゴールデンクロスは初動を捉える効果がほとんどなく、パーフェクトオーダーの新規転換（PO転換）の方が有効だった（「シグナルの検証（`analysis/`）」参照）。ダッシュボードには「PO転換」タブを実装済み（2026-10-17）。通知もPO転換を見たい
+  - **方針**: 通知の「ゴールデンクロス」の部分だけをPO転換に置き換える。`run_golden_cross.py`・`golden_cross.csv`・ダッシュボードのゴールデンクロスのタブは当面残す（廃止するかは使ってみて判断）。ダッシュボードのPO転換タブは毎回計算する今の作りのままでよい（`perfect_order.csv`と同じ関数で判定するため結果は一致する）
+  - **手順**:
+    1. 作業前にMac miniで`git pull`する（判定の関数はMacBook Airで`filters.py`に追加済み）
+    2. `run_perfect_order.py`を新規作成する。`run_golden_cross.py`と同じ形で、判定に`filters.py`の`fresh_perfect_order_tickers(tickers, close_wide)`（戻り値は`{ticker: 成立日}`、直近`PO_LOOKBACK`=5営業日の新規成立かつ成立日のRSがプラス）を使う。出力は`perfect_order.csv`で、列は`ticker, po_date, relative_strength, 銘柄名, 33業種区分`。`po_date`は`%Y-%m-%d`の文字列、`relative_strength`は最新のRS（`filters.py`の`relative_strength(tickers, close_wide)`の値。ダッシュボードの`load_latest_rs()`と同じ）、銘柄名・業種は`universe.csv`から付ける。並びは`po_date`の新しい順、同日は`relative_strength`の高い順（ダッシュボードの`load_perfect_order()`と同じ）。該当0件の日もヘッダー行だけのCSVを書き出す（`notify.py`が読めるように）
+    3. `scripts/daily_job.sh`: `uv run python run_golden_cross.py`の次の行に`uv run python run_perfect_order.py`を足し、`git add`の対象に`perfect_order.csv`を加える
+    4. `notify.py`の`build_success_message()`: ゴールデンクロスの部分（`new_entries("golden_cross.csv", base)`とその表示）を`perfect_order.csv`に置き換える。見出しは`**PO転換**: {件数}銘柄（新規 {新規件数}）`、各行は`・{ticker} {銘柄名}（{33業種区分}）{po_date} RS {relative_strength:+.1%}`（RS上位の行と同じ書式）。新規の判定（`new_entries()`）と表示件数の上限（`MAX_ITEMS`=10）は既存の仕組みをそのまま使う
+    5. 確認: `uv run python run_perfect_order.py`で`perfect_order.csv`を作り、`uv run python notify.py success --base HEAD --dry-run`で通知文を確認する（送信はしない）。ダッシュボードのPO転換タブと銘柄数・銘柄が一致することも確認する
+    6. commit＆pushし、READMEを更新する（この「今後の作業」の項目、上の「成功時」の項目、「スクリーニング条件（パーフェクトオーダー転換・初動検知）」の「出力」の項目）
+  - **注意**: 導入した日の初回だけは、比較元（前回のcommit）に`perfect_order.csv`がないため全件（約40銘柄）が「新規」になる（表示は10件まで、残りは「…ほか○銘柄」）。2日目からは、その日に新しく成立した銘柄（1日約8件）だけが新規になる見込み。PO転換の銘柄は成立から5営業日リストに残るため、同じ銘柄が新規として通知されるのは成立日の1回だけ
 
 ## 検討して見送った代替案
 

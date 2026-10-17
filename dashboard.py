@@ -100,6 +100,36 @@ def data_as_of(ohlcv):
     return ohlcv.loc[ohlcv["ticker"] == BENCHMARK_TICKER, "date"].max()
 
 
+RIBBON_SLOW = 12  # リボンの遅い側のEMA（速い側は5EMA）。TradingViewの表示に合わせる
+RIBBON_UP_COLOR = "rgba(41, 182, 246, 0.30)"  # 5EMA > 12EMA（水色）
+RIBBON_DOWN_COLOR = "rgba(255, 138, 101, 0.30)"  # 5EMA < 12EMA（ピンク寄りのオレンジ）
+
+
+def add_ema_ribbon(fig, dates, fast, slow):
+    # 速いEMAと遅いEMAの間を、上下関係に応じて2色で塗る
+    # 色ごとに1本のトレースにまとめ、区間をNoneで区切ってfill="toself"で区間ごとに塗る（区間ごとにトレースを作ると数が増え重くなるため）
+    dates, fast, slow = list(dates), list(fast), list(slow)
+    up = [f >= s for f, s in zip(fast, slow)]
+    for is_up, color in [(True, RIBBON_UP_COLOR), (False, RIBBON_DOWN_COLOR)]:
+        xs, ys = [], []
+        i = 0
+        while i < len(up):
+            if up[i] != is_up:
+                i += 1
+                continue
+            j = i
+            while j + 1 < len(up) and up[j + 1] == is_up:
+                j += 1
+            end = min(j + 1, len(up) - 1)  # 次の区間の始まりまで伸ばして、色の切り替わりで隙間ができないようにする
+            xs += dates[i:end + 1] + dates[i:end + 1][::-1] + [None]
+            ys += fast[i:end + 1] + slow[i:end + 1][::-1] + [None]
+            i = j + 1
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines", line=dict(width=0),
+            fill="toself", fillcolor=color, hoverinfo="skip", showlegend=False,
+        ), row=1, col=1)
+
+
 def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_rs=True, height=600, title=None):
     full_data = ohlcv[ohlcv["ticker"] == ticker].sort_values("date")
 
@@ -110,7 +140,9 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
     # 指標は全期間データで計算してから表示範囲を絞り込む（EMA等のウォームアップを保つため）
     ema25 = full_data["close"].ewm(span=25, adjust=False).mean()
     ema_short = full_data["close"].ewm(span=GOLDEN_CROSS_SHORT, adjust=False).mean()
+    ema12 = full_data["close"].ewm(span=RIBBON_SLOW, adjust=False).mean()
     ema75 = full_data["close"].ewm(span=75, adjust=False).mean()
+    ema200 = full_data["close"].ewm(span=200, adjust=False).mean()
     rolling_std = full_data["close"].rolling(25).std()
     if show_rs:
         rs_series = relative_strength_series(ticker, close_wide, BENCHMARK_TICKER, RS_PERIOD)
@@ -121,7 +153,9 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
         ticker_data = full_data[mask]
         ema25 = ema25[mask]
         ema_short = ema_short[mask]
+        ema12 = ema12[mask]
         ema75 = ema75[mask]
+        ema200 = ema200[mask]
         rolling_std = rolling_std[mask]
         if show_rs:
             rs_series = rs_series[rs_series.index >= cutoff]
@@ -136,6 +170,10 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
         )
     else:
         fig = make_subplots(rows=1, cols=1)
+
+    # 5EMAと12EMAのリボン（ローソク足の下に塗りが来るよう先に描く。5EMA・12EMAの線自体は描かない）
+    add_ema_ribbon(fig, ticker_data["date"], ema_short, ema12)
+
     fig.add_trace(go.Candlestick(
         x=ticker_data["date"],
         open=ticker_data["open"],
@@ -143,24 +181,16 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
         low=ticker_data["low"],
         close=ticker_data["close"],
         name="株価",
-        increasing=dict(line=dict(color="#66BB6A", width=1.2), fillcolor="#66BB6A"),
-        decreasing=dict(line=dict(color="#EF5350", width=1.2), fillcolor="#EF5350"),
+        # 線の色はTradingViewの表示に合わせている（陽線・75EMAは青緑系、陰線・25EMAは赤系、200EMAは青）
+        increasing=dict(line=dict(color="#26C6DA", width=1.2), fillcolor="#26C6DA"),
+        decreasing=dict(line=dict(color="#F23645", width=1.2), fillcolor="#F23645"),
     ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(
-        x=ticker_data["date"], y=ema25, mode="lines", name="25EMA",
-        line=dict(color="#2196F3", width=1.5),
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=ticker_data["date"], y=ema_short, mode="lines", name=f"{GOLDEN_CROSS_SHORT}EMA",
-        line=dict(color="#EB6101", width=1.5),
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=ticker_data["date"], y=ema75, mode="lines", name="75EMA",
-        line=dict(color="#C0CA33", width=1.5),
-    ), row=1, col=1)
+    for ema, span, color in [(ema25, 25, "#E53935"), (ema75, 75, "#00ACC1"), (ema200, 200, "#2962FF")]:
+        fig.add_trace(go.Scatter(
+            x=ticker_data["date"], y=ema, mode="lines", name=f"{span}EMA",
+            line=dict(color=color, width=1.5),
+        ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25 + 2 * rolling_std, mode="lines", name="+2σ",
@@ -169,7 +199,7 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
     fig.add_trace(go.Scatter(
         x=ticker_data["date"], y=ema25 - 2 * rolling_std, mode="lines", name="-2σ",
         line=dict(color="#64B5F6", width=0.5),
-        fill="tonexty", fillcolor="rgba(100, 181, 246, 0.15)",
+        fill="tonexty", fillcolor="rgba(100, 181, 246, 0.07)",
         showlegend=False,
     ), row=1, col=1)
     for sign, label in [(1, "+1σ"), (-1, "-1σ")]:

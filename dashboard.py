@@ -4,8 +4,8 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from filters import (
-    BENCHMARK_TICKER, GOLDEN_CROSS_SHORT, RS_PERIOD,
-    above_ema_wide, liquidity_passed_tickers, load_close_wide,
+    BENCHMARK_TICKER, GOLDEN_CROSS_SHORT, PO_LOOKBACK, RS_PERIOD,
+    above_ema_wide, fresh_perfect_order_tickers, liquidity_passed_tickers, load_close_wide,
     relative_strength, relative_strength_series, relative_strength_wide, sector_breadth,
 )
 
@@ -80,6 +80,19 @@ def load_sector_leaders():
 def load_latest_rs():
     # 流動性フィルタ通過銘柄の最新RS（RSの高い順。データ不足で計算できない銘柄は含まない）
     return relative_strength(liquidity_passed_tickers(), load_close_wide_cached())
+
+
+@st.cache_data(ttl=600)
+def load_perfect_order():
+    # 直近PO_LOOKBACK営業日以内にパーフェクトオーダーが新規成立し、成立日のRSがプラスの銘柄（成立日の新しい順、同日はRSの高い順）
+    signals = fresh_perfect_order_tickers(liquidity_passed_tickers(), load_close_wide_cached())
+    if not signals:
+        return pd.DataFrame(columns=["33業種区分", "銘柄名", "ticker", "po_date", "rs"])
+    df = pd.DataFrame({"ticker": list(signals), "po_date": [d.strftime("%Y-%m-%d") for d in signals.values()]})
+    df["rs"] = df["ticker"].map(load_latest_rs())
+    universe = pd.read_csv(UNIVERSE_FILE)[["ticker", "銘柄名", "33業種区分"]]
+    df = df.merge(universe, on="ticker", how="left")
+    return df.sort_values(["po_date", "rs"], ascending=[False, False])
 
 
 def data_as_of(ohlcv):
@@ -387,8 +400,8 @@ as_of = data_as_of(ohlcv)
 st.caption(f"データ基準日: {as_of:%Y-%m-%d}（{'月火水木金土日'[as_of.weekday()]}）の終値")
 
 # 選択中のタブだけを実行する（既定では全タブを毎回描画するため、チャートの多いタブを足すと全操作が重くなる）
-tab_rs, tab_golden, tab_breadth, tab_overview, tab_candidates = st.tabs(
-    ["RS上位", "ゴールデンクロス", "業種別", "業種俯瞰", "業種内候補"], key="main_tab", on_change="rerun"
+tab_rs, tab_po, tab_golden, tab_breadth, tab_overview, tab_candidates = st.tabs(
+    ["RS上位", "PO転換", "ゴールデンクロス", "業種別", "業種俯瞰", "業種内候補"], key="main_tab", on_change="rerun"
 )
 
 if tab_rs.open:
@@ -399,6 +412,20 @@ if tab_rs.open:
         display_df["RS(%)"] = (display_df["relative_strength"] * 100).round(2)
         display_df = display_df[["33業種区分", "銘柄名", "ticker", "RS(%)"]].rename(columns={"33業種区分": "業種"})
         render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days, f"rs_top_{as_of:%Y%m%d}.txt")
+
+if tab_po.open:
+    with tab_po:
+        po = load_perfect_order()
+        st.caption(
+            f"流動性フィルタ通過銘柄のうち、パーフェクトオーダー（5EMA > 25EMA > 75EMA）が直近{PO_LOOKBACK}営業日以内に新規成立"
+            f"（直前20営業日は不成立）し、成立日のRSがプラスの{len(po)}銘柄。データが63営業日に満たない銘柄は対象外"
+        )
+        display_df = po.copy()
+        display_df["RS(%)"] = (display_df["rs"] * 100).round(2)
+        display_df = display_df[["33業種区分", "銘柄名", "ticker", "po_date", "RS(%)"]].rename(
+            columns={"33業種区分": "業種", "po_date": "PO成立日"}
+        )
+        render_screening_tab(display_df, "po", ohlcv, close_wide, display_days, f"perfect_order_{as_of:%Y%m%d}.txt")
 
 if tab_golden.open:
     with tab_golden:

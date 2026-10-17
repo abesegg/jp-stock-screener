@@ -5,6 +5,9 @@ RS_PERIOD = 21
 GOLDEN_CROSS_SHORT = 5
 GOLDEN_CROSS_LONG = 25
 GOLDEN_CROSS_LOOKBACK = 3
+EMA_WARMUP_DAYS = 63  # 銘柄ごとに、データ開始からこの営業日数はEMAの助走期間として判定に使わない
+PO_FRESH_DAYS = 20  # 直前のこの営業日数にパーフェクトオーダーでなかった銘柄の成立を「新規」とする
+PO_LOOKBACK = 5  # 直近この営業日数以内の新規成立を抽出する（1日約8件のため、ゴールデンクロスの3日より広げている）
 
 
 def liquidity_passed_tickers(screening_result_path="screening_result.csv"):
@@ -93,3 +96,25 @@ def sector_breadth(flags_wide, sector_of):
     hit["全体"] = hit.sum(axis=1)
     count["全体"] = count.sum(axis=1)
     return hit / count, count
+
+
+def perfect_order_wide(close_wide, spans=(GOLDEN_CROSS_SHORT, GOLDEN_CROSS_LONG, 75)):
+    # パーフェクトオーダー（短期EMA > 中期EMA > 長期EMA）が成立しているか（index=date, columns=ticker）
+    short, mid, long = (close_wide.ewm(span=s, adjust=False).mean() for s in spans)
+    return (short > mid) & (mid > long)
+
+
+def fresh_perfect_order_wide(close_wide, fresh_days=PO_FRESH_DAYS, warmup_days=EMA_WARMUP_DAYS):
+    # パーフェクトオーダーの新規成立日（直前fresh_days営業日にPOでなかった銘柄の成立）。助走期間中・終値欠損の日は除く
+    po = perfect_order_wide(close_wide)
+    po_recent = po.shift(1, fill_value=False).astype(float).rolling(fresh_days, min_periods=1).max() > 0
+    usable = close_wide.notna() & (close_wide.notna().cumsum() > warmup_days)
+    return po & ~po_recent & usable
+
+
+def fresh_perfect_order_tickers(tickers, close_wide, benchmark_ticker=BENCHMARK_TICKER, lookback=PO_LOOKBACK):
+    # 直近lookback営業日以内にパーフェクトオーダーが新規成立し、成立日のRSがプラスの銘柄 → {ticker: 成立日}
+    available = [t for t in tickers if t in close_wide.columns]
+    rs = relative_strength_wide(close_wide, benchmark_ticker)[available]
+    signal = (fresh_perfect_order_wide(close_wide[available]) & (rs > 0)).tail(lookback)
+    return {t: signal[t][signal[t]].index[-1] for t in signal.columns if signal[t].any()}

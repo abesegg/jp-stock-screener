@@ -400,8 +400,13 @@ def render_sector_candidates_tab(ohlcv, close_wide, display_days):
     universe = pd.read_csv(UNIVERSE_FILE).set_index("ticker")
     df = load_latest_rs().rename("rs").to_frame().join(universe[["銘柄名", "33業種区分"]])
     df = df[df["33業種区分"] == sector]
-    st.caption(f"{sector}: RSを計算できた{len(df)}銘柄のうち、RS上位{min(len(df), CANDIDATE_COUNT)}銘柄")
-    top = df.head(CANDIDATE_COUNT)
+    # 買い候補を探すタブのため、TOPIXに負けている（RSがマイナスの）銘柄は表示しない
+    positive = df[df["rs"] > 0]
+    top = positive.head(CANDIDATE_COUNT)
+    st.caption(f"{sector}: RSを計算できた{len(df)}銘柄のうち、RSがプラスの{len(positive)}銘柄から上位{len(top)}銘柄")
+    if top.empty:
+        st.info("この業種にRSがプラスの銘柄はありません")
+        return
 
     for row_start in range(0, len(top), 3):
         cols = st.columns(3)

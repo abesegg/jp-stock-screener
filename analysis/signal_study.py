@@ -22,7 +22,13 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from filters import BENCHMARK_TICKER, liquidity_passed_tickers, relative_strength_wide  # noqa: E402
+from filters import (  # noqa: E402
+    BENCHMARK_TICKER,
+    above_ema_wide,
+    liquidity_passed_tickers,
+    relative_strength_wide,
+    sector_breadth,
+)
 
 WARMUP_DAYS = 63  # 銘柄ごとに、データ開始からこの営業日数はEMAの助走期間として判定に使わない（約3か月）
 FRESH_DAYS = 20  # 直前のこの営業日数にパーフェクトオーダーでなかった銘柄の成立を「新規」とする
@@ -34,11 +40,11 @@ EXPORT_FILE = ROOT / "analysis" / "po_signals.csv"  # --exportで書き出すPO�
 HISTORY_FILE = ROOT / "ohlcv_history.csv"  # analysis/fetch_history.pyで取得した、daily_ohlcv.csvより前の過去データ（検証専用）
 
 
-def load_close(with_history):
-    # daily_ohlcv.csvと過去データは日付が重ならないため、つなげて横長にする
+def load_wide(with_history):
+    # daily_ohlcv.csvと過去データは日付が重ならないため、つなげて横長にする → (終値, 出来高)
     paths = [ROOT / "daily_ohlcv.csv"] + ([HISTORY_FILE] if with_history else [])
     df = pd.concat([pd.read_csv(p, parse_dates=["date"]) for p in paths])
-    return df.pivot(index="date", columns="ticker", values="close").sort_index()
+    return tuple(df.pivot(index="date", columns="ticker", values=v).sort_index() for v in ["close", "volume"])
 
 
 def forward_excess_return(close, bench, horizon):
@@ -91,8 +97,9 @@ def monthly_summary(signals, outcome, metric):
     return pd.DataFrame(table)
 
 
-def export_signals(signal, close, rs, outcomes, path):
+def export_signals(signal, close, rs, outcomes, path, features, labels):
     # シグナル1件を1行とする一覧をCSVに書き出す（成立日の古い順、同日はRSの高い順）
+    # 継続の区分（対象外・判定期間が未到来なら空欄）と、成立日の特徴の列も付ける
     hits = signal.stack()
     hits = hits[hits].index  # (日付, ticker)のMultiIndex
     dates = hits.get_level_values(0)
@@ -115,6 +122,9 @@ def export_signals(signal, close, rs, outcomes, path):
             df[label] = pd.array(v, dtype="Int64")  # 1/0、期間が未到来なら空欄
         else:
             df[f"{label}(%)"] = (v * 100).round(2)  # 期間が未到来なら空欄
+    df["継続の区分"] = labels.reindex(hits).to_numpy()
+    for name, wide in features.items():
+        df[name] = wide.stack().reindex(hits).to_numpy().round(3)
 
     df = df.sort_values(["成立日", "成立日のRS(%)"], ascending=[True, False])
     df.to_csv(path, index=False, encoding="utf-8-sig")  # Excelで文字化けしないようBOM付き
@@ -169,14 +179,144 @@ def ema200_study(fresh, close, bench):
         print(pd.DataFrame(rows).T.to_string())
 
 
+HOLD_DAYS = 60  # 成立後、継続したかを判定する営業日数
+CONTINUATION_LABELS = ["強い継続", "継続", "失敗"]
+
+
+def continuation_labels(fresh, po, close):
+    # PO新規（200EMAが安定し、成立日に200EMAより上）を、成立後HOLD_DAYS営業日の推移で3区分する → Series（index=(日付, ticker)）
+    # 強い継続: POが一度も崩れない／継続: POは崩れたが終値が200EMAを一度も下回らない／失敗: 終値が200EMAを下回った日がある
+    ema200 = close.ewm(span=200, adjust=False).mean()
+    stable = close.notna().cumsum() >= EMA200_MIN_DAYS
+    below = (close < ema200).to_numpy()  # 終値がない日（売買停止など）は下回ったとみなさない
+    po_np = po.to_numpy()
+    labels = {}
+    for i, c in zip(*np.nonzero((fresh & stable & (close > ema200)).to_numpy())):
+        if i + HOLD_DAYS >= len(close):
+            continue  # 判定期間が未到来
+        window = slice(i + 1, i + 1 + HOLD_DAYS)
+        if below[window, c].any():
+            label = "失敗"
+        elif po_np[window, c].all():
+            label = "強い継続"
+        else:
+            label = "継続"
+        labels[(close.index[i], close.columns[c])] = label
+    return pd.Series(labels, dtype=object)
+
+
+VOLUME_RECENT, VOLUME_BASE = 20, 60  # 出来高の増え方: 直近20日の平均 ÷ その前60日の平均
+HIGH_WINDOW, HIGH_MIN_DAYS = 250, 200  # 52週高値（250営業日。データが200日以上あれば計算する）
+QUINTILE_FEATURES = ["200EMAからの距離", "成立前にPOでなかった日数", "52週高値からの距離", "地合い: 75EMAより上の銘柄の割合"]  # 5等分して比べる特徴
+
+
+def run_length(flags):
+    # Trueが続いている日数（index=date, columns=ticker）
+    counts = flags.astype(int).cumsum()
+    return counts - counts.where(~flags).ffill().fillna(0)
+
+
+def signal_features(close, volume, bench, po, rs, sector_of):
+    # 成立日の時点で分かる特徴 → {特徴名: DataFrame（index=date, columns=ticker）}
+    ema75, ema200 = (close.ewm(span=s, adjust=False).mean() for s in (75, 200))
+    breadth, _ = sector_breadth(above_ema_wide(close, 75), sector_of)
+    sectors = sector_of.reindex(close.columns)
+    sector_rs = rs.T.groupby(sectors).median().T.rank(axis=1, pct=True)
+
+    def by_date(s):  # 日付ごとの値を全銘柄に配る
+        return pd.DataFrame({t: s for t in close.columns})
+
+    def by_sector(wide):  # 業種の値を各銘柄に配る
+        return wide.reindex(columns=sectors.to_numpy()).set_axis(close.columns, axis=1)
+
+    return {
+        "地合い: TOPIXが75EMAより上": by_date((bench > bench.ewm(span=75, adjust=False).mean()).astype(float)),
+        "地合い: 75EMAより上の銘柄の割合": by_date(breadth["全体"]),
+        "業種: 75EMAより上の銘柄の割合": by_sector(breadth),
+        "業種: RSの順位（1が最強）": by_sector(sector_rs),
+        "RSの順位（1が最強）": rs.rank(axis=1, pct=True),
+        "200EMAからの距離": close / ema200 - 1,
+        "75EMAからの距離": close / ema75 - 1,
+        "52週高値からの距離": close / close.rolling(HIGH_WINDOW, min_periods=HIGH_MIN_DAYS).max() - 1,
+        "出来高の増え方": volume.rolling(VOLUME_RECENT).mean() / volume.shift(VOLUME_RECENT).rolling(VOLUME_BASE).mean(),
+        "成立前にPOでなかった日数": run_length(~po).shift(1),
+    }
+
+
+def auc(success, failure):
+    # 成功のグループの値が、失敗のグループより大きい確率（0.5=差なし）
+    s, f = success.dropna(), failure.dropna()
+    if not len(s) or not len(f):
+        return float("nan")
+    ranks = pd.concat([s, f]).rank()
+    return (ranks.iloc[:len(s)].sum() - len(s) * (len(s) + 1) / 2) / (len(s) * len(f))
+
+
+def continuation_study(labels, features, close, bench):
+    # 継続の区分ごとに超過リターンを並べ、定義がリターンと結びついているかを確かめる（--continuation）
+    # あわせて成立日の特徴を区分ごとに比べる
+    fwd = {h: forward_excess_return(close, bench, h).stack() for h in HORIZONS}
+    df = pd.DataFrame({"区分": labels} | {h: fwd[h].reindex(labels.index) for h in HORIZONS})
+    df["年"] = df.index.get_level_values(0).year
+
+    def fmt(v):
+        v = v.dropna()
+        return f"{v.mean() * 100:+.1f}% / {v.median() * 100:+.1f}%／{(v > 0).mean() * 100:.0f}%" if len(v) else "-"
+
+    print(f"\n■ PO新規の継続（200EMA安定後に、200EMAより上で成立したシグナル。成立後{HOLD_DAYS}営業日で判定）"
+          "　※超過リターンの「平均 / 中央値／勝率」")
+    for period in ["全期間"] + sorted(df["年"].unique().tolist()):
+        part = df if period == "全期間" else df[df["年"] == period]
+        rows = {}
+        for name in ["全体"] + CONTINUATION_LABELS:
+            g = part if name == "全体" else part[part["区分"] == name]
+            rows[name] = {"件数": len(g), "割合": f"{len(g) / len(part):.0%}"} | {f"{h}日超過": fmt(g[h]) for h in HORIZONS}
+        print(f"\n{period}:")
+        print(pd.DataFrame(rows).T.to_string())
+
+    # 成功（強い継続＋継続）と失敗で、成立日の特徴を比べる
+    for name, wide in features.items():
+        df[name] = wide.stack().reindex(labels.index).to_numpy()
+    success = df["区分"] != "失敗"
+    years = sorted(df["年"].unique().tolist())
+    rows = {}
+    for name in features:
+        row = {f"中央値 {label}": round(df.loc[df["区分"] == label, name].median(), 3) for label in CONTINUATION_LABELS}
+        row["AUC 全期間"] = round(auc(df.loc[success, name], df.loc[~success, name]), 2)
+        for year in years:
+            in_year = df["年"] == year
+            row[f"AUC {year}"] = round(auc(df.loc[success & in_year, name], df.loc[~success & in_year, name]), 2)
+        rows[name] = row
+    print("\n■ 成立日の特徴（区分ごとの中央値と、成功（強い継続＋継続）と失敗の差のAUC）"
+          "　※AUC: 成功の値が失敗より大きい確率。0.5=差なし、1に近いほど成功で大きく、0に近いほど成功で小さい")
+    print(pd.DataFrame(rows).T.to_string())
+
+    # 区分の定義（200EMAを割ったか）に左右されないよう、特徴の値で5等分して超過リターンそのものを比べる
+    def fmt_ret(v):
+        v = v.dropna()
+        return f"{v.median() * 100:+.1f}%／{(v > 0).mean() * 100:.0f}%" if len(v) else "-"
+
+    for name in QUINTILE_FEATURES:
+        groups = pd.qcut(df[name], 5, labels=False, duplicates="drop")
+        rows = {}
+        for q, g in df.groupby(groups):
+            row = {"範囲": f"{g[name].min():.3g}〜{g[name].max():.3g}", "件数": len(g)}
+            row |= {f"{h}日超過": fmt_ret(g[h]) for h in HORIZONS}
+            row |= {f"60日中央値 {y}": f"{g.loc[g['年'] == y, 60].median() * 100:+.1f}%" for y in years}
+            rows[f"{int(q) + 1}（小）" if q == 0 else f"{int(q) + 1}（大）" if q == groups.max() else f"{int(q) + 1}"] = row
+        print(f"\n■ {name}で5等分した超過リターン（中央値／勝率）")
+        print(pd.DataFrame(rows).T.to_string())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--export", action="store_true", help=f"PO新規の一覧を{EXPORT_FILE.name}に書き出す")
     parser.add_argument("--daily-only", action="store_true", help="過去データを使わずdaily_ohlcv.csvだけで集計する（以前の結果との比較用）")
     parser.add_argument("--ema200", action="store_true", help="PO新規と200EMAの位置関係を集計する")
+    parser.add_argument("--continuation", action="store_true", help=f"PO新規を成立後{HOLD_DAYS}営業日の推移で3区分し、超過リターンを比べる")
     args = parser.parse_args()
 
-    close_wide = load_close(not args.daily_only)
+    close_wide, volume_wide = load_wide(not args.daily_only)
     tickers = [t for t in liquidity_passed_tickers(ROOT / "screening_result.csv") if t in close_wide.columns]
     close = close_wide[tickers]
     bench = close_wide[BENCHMARK_TICKER]
@@ -223,10 +363,18 @@ def main():
         print(f"\n■ 月別: {title}　※「値 (件数)」、月はシグナルが出た月")
         print(monthly_summary(monthly_signals, outcome, metric).to_string())
 
+    features, labels = {}, pd.Series(dtype=object)
+    if args.export or args.continuation:
+        sector_of = pd.read_csv(ROOT / "universe.csv").set_index("ticker")["33業種区分"]
+        features = signal_features(close, volume_wide[tickers], bench, po, rs, sector_of)
+        labels = continuation_labels(fresh, po, close)
+
     if args.export:
-        export_signals(fresh, close, rs, outcomes, EXPORT_FILE)
+        export_signals(fresh, close, rs, outcomes, EXPORT_FILE, features, labels)
     if args.ema200:
         ema200_study(fresh, close, bench)
+    if args.continuation:
+        continuation_study(labels, features, close, bench)
 
 
 if __name__ == "__main__":

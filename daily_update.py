@@ -3,6 +3,8 @@ import time
 import pandas as pd
 import yfinance as yf
 
+from filters import liquidity_passed_tickers
+from ohlcv import download_ohlcv, mismatched_tickers, replace_history
 from storage import append_dedup
 
 BATCH_SIZE = 200
@@ -56,6 +58,20 @@ for i, batch in enumerate(batches, start=1):
     if i < len(batches):
         time.sleep(SLEEP_BETWEEN_BATCHES)
 
+# 分割・配当落ちで過去の価格が調整された銘柄は、全期間を取り直して置き換える（5日分の上書きだけでは古い行との間に段差ができるため）
+# ベンチマークは手動修正した異常値があるため対象外にし、警告だけ出す。流動性フィルタを通過しない銘柄はスクリーニングに使わないため対象外
+# （通過しない銘柄には、上場廃止などでyfinanceの値が壊れた銘柄がある）
+existing = pd.read_csv(OHLCV_FILE)
+adjusted = mismatched_tickers(pd.DataFrame(rows), existing) if rows else []
+if BENCHMARK_TICKER in adjusted:
+    print(f"警告: {BENCHMARK_TICKER}の過去の価格が調整されています。手動で確認してください")
+passed = set(liquidity_passed_tickers())
+adjusted = [t for t in adjusted if t != BENCHMARK_TICKER and t in passed]
+if adjusted:
+    print(f"過去の価格が調整された銘柄: {len(adjusted)}銘柄（全期間を取り直して置き換え）")
+    fresh, _ = download_ohlcv(adjusted, start=existing["date"].min())
+    if not fresh.empty:
+        replace_history(existing, fresh).to_csv(OHLCV_FILE, index=False)
 
 combined = append_dedup(pd.DataFrame(rows), OHLCV_FILE, ["date", "ticker"])
 

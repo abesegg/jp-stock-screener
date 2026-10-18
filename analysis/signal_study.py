@@ -6,6 +6,8 @@
 実行（プロジェクトフォルダで）: uv run python analysis/signal_study.py
 --exportを付けると、PO新規のシグナル1件ごとの一覧をanalysis/po_signals.csv（git管理外）に書き出す。
 データは読むだけで書き換えない。
+過去データ（ohlcv_history.csv、analysis/fetch_history.pyで取得）をdaily_ohlcv.csvの前につなげて使う。
+--daily-onlyを付けるとdaily_ohlcv.csvだけで集計する。
 
 注意: 流動性フィルタは現時点の通過銘柄を過去にも当てはめている（過去は流動性が低かった銘柄も含む）。
 また上場廃止で一覧から消えた銘柄はデータにないため、結果はやや良く出る可能性がある。
@@ -14,12 +16,13 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from filters import BENCHMARK_TICKER, liquidity_passed_tickers, load_close_wide, relative_strength_wide  # noqa: E402
+from filters import BENCHMARK_TICKER, liquidity_passed_tickers, relative_strength_wide  # noqa: E402
 
 WARMUP_DAYS = 63  # 銘柄ごとに、データ開始からこの営業日数はEMAの助走期間として判定に使わない（約3か月）
 FRESH_DAYS = 20  # 直前のこの営業日数にパーフェクトオーダーでなかった銘柄の成立を「新規」とする
@@ -28,6 +31,14 @@ RS_TOP_PCT = 0.10  # RS上位の基準（rs_ranking.csvと同じ上位10%）
 RS_TOP_WITHIN = 20  # シグナル後、この営業日数以内にRS上位に入ったかを見る
 HORIZONS = [20, 60]  # 超過リターンを測る営業日数
 EXPORT_FILE = ROOT / "analysis" / "po_signals.csv"  # --exportで書き出すPO新規の一覧
+HISTORY_FILE = ROOT / "ohlcv_history.csv"  # analysis/fetch_history.pyで取得した、daily_ohlcv.csvより前の過去データ（検証専用）
+
+
+def load_close(with_history):
+    # daily_ohlcv.csvと過去データは日付が重ならないため、つなげて横長にする
+    paths = [ROOT / "daily_ohlcv.csv"] + ([HISTORY_FILE] if with_history else [])
+    df = pd.concat([pd.read_csv(p, parse_dates=["date"]) for p in paths])
+    return df.pivot(index="date", columns="ticker", values="close").sort_index()
 
 
 def forward_excess_return(close, bench, horizon):
@@ -110,12 +121,62 @@ def export_signals(signal, close, rs, outcomes, path):
     print(f"\nPO新規の一覧を{path.relative_to(ROOT)}に書き出しました（{len(df)}件）")
 
 
+EMA200_MIN_DAYS = 200  # 200EMAを使うのは、銘柄ごとにデータ開始からこの営業日数以降（初日の終値の重みが約13%以下になる）
+CROSS_WITHIN = 20  # 200EMAより下で成立した銘柄が、この営業日数以内に上抜けたかを見る
+
+
+def ema200_study(fresh, close, bench):
+    # PO新規と200EMAの位置関係（--ema200）。200EMAが安定した日のシグナルだけを使う
+    # B・手じまい判断は、判断できる日（上抜けた日・20日目）から成績を測る
+    ema200 = close.ewm(span=200, adjust=False).mean()
+    stable = close.notna() & (close.notna().cumsum() >= EMA200_MIN_DAYS)
+    above = (close > ema200).to_numpy()
+    fwd = {h: forward_excess_return(close, bench, h).to_numpy() for h in HORIZONS}
+
+    records = []  # (分け方, シグナルの年, 成績を測る起点の行, 列)
+    for i, c in zip(*np.nonzero((fresh & stable).to_numpy())):
+        year = close.index[i].year
+        if above[i, c]:
+            records.append(("A: 成立日に200EMAより上", year, i, c))
+            continue
+        records.append(("A: 成立日に200EMAより下", year, i, c))
+        if i + CROSS_WITHIN >= len(close):
+            continue  # 上抜けたかを判定する期間が未到来
+        window = above[i + 1:i + 1 + CROSS_WITHIN, c]
+        label = "上抜け" if window.any() else "上抜けず"
+        if window.any():
+            records.append(("B: 下で成立→上抜けた日に入る", year, i + 1 + window.argmax(), c))
+        records.append((f"C（参考）: 下で成立→{CROSS_WITHIN}日以内に{label}", year, i, c))
+        records.append((f"手じまい判断: {CROSS_WITHIN}日目に{label}（{CROSS_WITHIN}日目から測る）", year, i + CROSS_WITHIN, c))
+
+    df = pd.DataFrame(records, columns=["分け方", "年", "row", "col"])
+    for h in HORIZONS:
+        df[h] = fwd[h][df["row"], df["col"]]
+    stable_np, years = stable.to_numpy(), close.index.year.to_numpy()
+
+    def fmt(v):
+        v = pd.Series(v).dropna()
+        return f"{v.median() * 100:+.1f}%／{(v > 0).mean() * 100:.0f}%（{len(v)}）" if len(v) else "-"
+
+    print(f"\n■ PO新規と200EMAの位置関係（データ開始から{EMA200_MIN_DAYS}営業日以降のシグナル）　※超過リターンの「中央値／勝率（件数）」")
+    for period in ["全期間"] + sorted(df["年"].unique().tolist()):
+        part = df if period == "全期間" else df[df["年"] == period]
+        base_mask = stable_np if period == "全期間" else stable_np & (years == period)[:, None]
+        rows = {"（基準）200EMA安定後の全銘柄・全日": {f"{h}日超過": fmt(fwd[h][base_mask]) for h in HORIZONS}}
+        for name, g in part.groupby("分け方", sort=False):
+            rows[name] = {f"{h}日超過": fmt(g[h]) for h in HORIZONS}
+        print(f"\n{period}:")
+        print(pd.DataFrame(rows).T.to_string())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--export", action="store_true", help=f"PO新規の一覧を{EXPORT_FILE.name}に書き出す")
+    parser.add_argument("--daily-only", action="store_true", help="過去データを使わずdaily_ohlcv.csvだけで集計する（以前の結果との比較用）")
+    parser.add_argument("--ema200", action="store_true", help="PO新規と200EMAの位置関係を集計する")
     args = parser.parse_args()
 
-    close_wide = load_close_wide(ROOT / "daily_ohlcv.csv")
+    close_wide = load_close(not args.daily_only)
     tickers = [t for t in liquidity_passed_tickers(ROOT / "screening_result.csv") if t in close_wide.columns]
     close = close_wide[tickers]
     bench = close_wide[BENCHMARK_TICKER]
@@ -164,6 +225,8 @@ def main():
 
     if args.export:
         export_signals(fresh, close, rs, outcomes, EXPORT_FILE)
+    if args.ema200:
+        ema200_study(fresh, close, bench)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ def download_ohlcv(tickers, batch_size=200, sleep=2, **kwargs):
             print(f"  バッチ全体が失敗: {e}")
             failed.extend(batch)
             continue
+        data = data.copy()  # yfinanceの戻り値は断片化しており、そのまま縦長に変換するとPerformanceWarningが大量に出るため
         long = pd.concat(
             [data[f].reset_index().melt(id_vars="Date", var_name="ticker", value_name=f.lower()).set_index(["Date", "ticker"])
              for f in FIELDS],

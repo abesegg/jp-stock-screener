@@ -14,3 +14,6 @@ logs/
 
 # Discord Webhook URLなどの秘密情報
 .env
+
+# analysis/signal_study.py --exportで毎回作り直す一覧
+analysis/po_signals.csv

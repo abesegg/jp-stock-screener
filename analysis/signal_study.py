@@ -4,11 +4,13 @@
 シグナル発生後にRS上位に入ったか・TOPIXを上回ったかを過去データで集計する。
 
 実行（プロジェクトフォルダで）: uv run python analysis/signal_study.py
+--exportを付けると、PO新規のシグナル1件ごとの一覧をanalysis/po_signals.csv（git管理外）に書き出す。
 データは読むだけで書き換えない。
 
 注意: 流動性フィルタは現時点の通過銘柄を過去にも当てはめている（過去は流動性が低かった銘柄も含む）。
 また上場廃止で一覧から消えた銘柄はデータにないため、結果はやや良く出る可能性がある。
 """
+import argparse
 import sys
 from pathlib import Path
 
@@ -25,6 +27,7 @@ SLOPE_DAYS = 5  # 75EMAの向きを判定する営業日数
 RS_TOP_PCT = 0.10  # RS上位の基準（rs_ranking.csvと同じ上位10%）
 RS_TOP_WITHIN = 20  # シグナル後、この営業日数以内にRS上位に入ったかを見る
 HORIZONS = [20, 60]  # 超過リターンを測る営業日数
+EXPORT_FILE = ROOT / "analysis" / "po_signals.csv"  # --exportで書き出すPO新規の一覧
 
 
 def forward_excess_return(close, bench, horizon):
@@ -77,7 +80,41 @@ def monthly_summary(signals, outcome, metric):
     return pd.DataFrame(table)
 
 
+def export_signals(signal, close, rs, outcomes, path):
+    # シグナル1件を1行とする一覧をCSVに書き出す（成立日の古い順、同日はRSの高い順）
+    hits = signal.stack()
+    hits = hits[hits].index  # (日付, ticker)のMultiIndex
+    dates = hits.get_level_values(0)
+    universe = pd.read_csv(ROOT / "universe.csv").set_index("ticker")
+
+    df = pd.DataFrame({
+        "成立日": dates.strftime("%Y-%m-%d"),
+        "月": dates.strftime("%Y-%m"),
+        "ticker": hits.get_level_values(1),
+    })
+    df["銘柄名"] = df["ticker"].map(universe["銘柄名"])
+    df["業種"] = df["ticker"].map(universe["33業種区分"])
+    df["成立日の終値"] = close.stack().reindex(hits).to_numpy().round(1)
+    rs_at = rs.stack().reindex(hits).to_numpy()
+    df["成立日のRS(%)"] = (rs_at * 100).round(2)
+    df["RSプラス"] = rs_at > 0
+    for label, values in outcomes.items():
+        v = values.stack().reindex(hits).to_numpy()
+        if label.startswith(f"{RS_TOP_WITHIN}日以内"):
+            df[label] = pd.array(v, dtype="Int64")  # 1/0、期間が未到来なら空欄
+        else:
+            df[f"{label}(%)"] = (v * 100).round(2)  # 期間が未到来なら空欄
+
+    df = df.sort_values(["成立日", "成立日のRS(%)"], ascending=[True, False])
+    df.to_csv(path, index=False, encoding="utf-8-sig")  # Excelで文字化けしないようBOM付き
+    print(f"\nPO新規の一覧を{path.relative_to(ROOT)}に書き出しました（{len(df)}件）")
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--export", action="store_true", help=f"PO新規の一覧を{EXPORT_FILE.name}に書き出す")
+    args = parser.parse_args()
+
     close_wide = load_close_wide(ROOT / "daily_ohlcv.csv")
     tickers = [t for t in liquidity_passed_tickers(ROOT / "screening_result.csv") if t in close_wide.columns]
     close = close_wide[tickers]
@@ -124,6 +161,9 @@ def main():
     ]:
         print(f"\n■ 月別: {title}　※「値 (件数)」、月はシグナルが出た月")
         print(monthly_summary(monthly_signals, outcome, metric).to_string())
+
+    if args.export:
+        export_signals(fresh, close, rs, outcomes, EXPORT_FILE)
 
 
 if __name__ == "__main__":

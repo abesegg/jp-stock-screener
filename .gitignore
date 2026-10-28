@@ -20,3 +20,5 @@ logs/
 
 # analysis/signal_study.py --exportで毎回作り直す一覧
 analysis/po_signals.csv
+# analysis/winner_study.py --exportで毎回作り直す一覧
+analysis/winner_episodes.csv

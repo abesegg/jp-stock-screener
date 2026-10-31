@@ -26,7 +26,8 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from analysis.signal_study import EMA200_MIN_DAYS, load_wide  # noqa: E402
+from analysis.signal_study import EMA200_MIN_DAYS, RS_TOP_PCT, load_wide  # noqa: E402
+from analysis.watch_study import RS_MA, macd_above, weekly_macd_above  # noqa: E402
 from filters import (  # noqa: E402
     BENCHMARK_TICKER,
     EMA_WARMUP_DAYS,
@@ -49,10 +50,13 @@ SLOPE200_DAYS = 20  # ⑥: 200EMAがこの営業日数前より高ければ「�
 RULES = [
     "①60日で売る", "②POが崩れたら売る", "③75EMAを割ったら売る", "④20日目に200EMAの下なら売り、以後は200EMAを割るまで",
     "⑤高値から20%下げたら売る", "⑥200EMAが上向きの間は200EMA割れ、それ以外は75EMA割れで売る", "⑦TOPIX比の線が75EMAを割ったら売る",
+    "⑧RSが0より下かつ10日平均より下になったら売る", "⑨日足MACDがシグナルを下回ったら売る", "⑩週足MACDがシグナルを下回ったら売る",
 ]
 WATCH_DAYS = 250  # ②′③′: シグナルからこの営業日数の間は、条件が戻ったら買い直す（約1年）
 COST = 0.002  # 1往復（買って売る）あたりのコスト（手数料・スリッページの目安）
 RULES_RE = {"②′POが成立している間は持つ（買い直しあり）": "po", "③′75EMAより上の間は持つ（買い直しあり）": "above75"}  # ルール名: 持つ条件
+WATCH_JUDGE_DAY = 20  # --watch: 監視の開始（シグナル）からこの営業日数目に判定する
+WATCH_MIN_SHARE = 0.6  # --watch: 判定日までにRS上位10%にいた日の割合がこれ以上なら、判定日の翌日に買う（watch_study.pyで最も良かったグループの下限）
 CHECK_TICKER, CHECK_DATE = "9075.T", "2025-07-28"  # 確認用: 福山通運のシグナル
 
 
@@ -91,6 +95,9 @@ def simulate(sig_pos, j, a):
     up200 = a["up200"][:, j]
     exits[RULES[5]] = sell_after(first_after((up200 & below200) | (~up200 & (c < a["ema75"][:, j])), entry))
     exits[RULES[6]] = sell_after(first_after(a["rel_below75"][:, j], entry))
+    exits[RULES[7]] = sell_after(first_after(a["rs_weak"][:, j], entry))
+    exits[RULES[8]] = sell_after(first_after(~a["macd_up"][:, j], entry))
+    exits[RULES[9]] = sell_after(first_after(~a["wmacd_up"][:, j], entry))
     return entry, exits
 
 
@@ -209,6 +216,8 @@ def report(trades, title):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--export", action="store_true", help=f"取引の一覧を{EXPORT_FILE.name}に書き出す")
+    parser.add_argument("--watch", action="store_true",
+                        help=f"シグナルの{WATCH_JUDGE_DAY}営業日目にRS上位{RS_TOP_PCT:.0%}にいた日の割合が{WATCH_MIN_SHARE:.0%}以上の銘柄だけ、その翌日に買う")
     args = parser.parse_args()
 
     close_wide, _ = load_wide(with_history=True)
@@ -234,26 +243,37 @@ def main():
         "up200": (ema200 > ema200.shift(SLOPE200_DAYS)).to_numpy(),
         "rel_below75": (rel < rel.ewm(span=75, adjust=False).mean()).to_numpy(),
         "stable": (n_obs >= EMA200_MIN_DAYS).to_numpy(),
+        "rs_weak": ((rs < 0) & (rs < rs.rolling(RS_MA).mean())).to_numpy(),
+        "macd_up": macd_above(filled).to_numpy(),
+        "wmacd_up": weekly_macd_above(filled).to_numpy(),
     }
     # 比べる相手の候補: POが成立中（新規でない）・助走期間を過ぎ・当日の終値がある銘柄
     control_pool = (po & ~fresh & close.notna() & (n_obs > EMA_WARMUP_DAYS)).to_numpy()
     sig = signal.to_numpy()
     in_period = (close.index >= pd.Timestamp(ENTRY_FROM)) & (close.index <= pd.Timestamp(ENTRY_TO))
 
+    top = (rs.rank(axis=1, pct=True) > 1 - RS_TOP_PCT).to_numpy()
     rng = np.random.default_rng(SEED)
     rows = []
     for i in np.flatnonzero(in_period):
-        if i + 1 > len(close) - 1:
-            continue
-        pool = np.flatnonzero(control_pool[i])
         for j in np.flatnonzero(sig[i]):
-            rows += trade_rows(i, j, a, "シグナル")
+            d = i  # 判定日（この翌日に買う）
+            if args.watch:
+                d = i + WATCH_JUDGE_DAY
+                if d + 1 > len(close) - 1 or top[i + 1:d + 1, j].mean() < WATCH_MIN_SHARE:
+                    continue
+            if d + 1 > len(close) - 1:
+                continue
+            rows += trade_rows(d, j, a, "シグナル")
+            pool = np.flatnonzero(control_pool[d])
             for k in rng.choice(pool, size=min(N_CONTROL, len(pool)), replace=False):
-                rows += trade_rows(i, k, a, "比べる相手")
+                rows += trade_rows(d, k, a, "比べる相手")
     trades = pd.DataFrame(rows)
 
     print(f"対象: 流動性フィルタ通過{len(tickers)}銘柄、シグナルの日 {ENTRY_FROM}〜{ENTRY_TO}、データの最終日 {a['dates'][-1]}")
     print("買い: シグナルの翌日の終値／売り: 条件を満たした翌日の終値／超過リターンはTOPIX（1306.T）に対する分")
+    if args.watch:
+        print(f"買い方: シグナルの{WATCH_JUDGE_DAY}営業日目までにRS上位{RS_TOP_PCT:.0%}にいた日の割合が{WATCH_MIN_SHARE:.0%}以上の銘柄を、その翌日の終値で買う")
     report(trades, "全期間")
     report(trades[trades["200EMA安定"]], f"200EMAが安定してからの買い（データ開始から{EMA200_MIN_DAYS}営業日以降）")
 

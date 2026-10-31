@@ -16,6 +16,7 @@
 """
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -45,19 +46,35 @@ PO_RECENT_DAYS = 20  # 安値日までのこの営業日数にPOが成立して�
 GAP_UP = 0.10  # 安値日から高値日までに、1日でこれ以上上がった日があれば「急騰型」とみなす
 RS_TOP_PCT = 0.10  # RS上位の基準（rs_ranking.csvと同じ上位10%）
 EXPORT_FILE = ROOT / "analysis" / "winner_episodes.csv"  # --exportで書き出すエピソードの一覧
+STEADY_HORIZON = 120  # --steady: 着実に上がる型を判定する営業日数
+STEADY_MAX_DD = 0.20  # --steady: 判定期間中の最大の下落幅（直前の高値からの下げ）がこれ以内
+STEADY_EXPORT_FILE = ROOT / "analysis" / "winner_episodes_steady.csv"  # --steady --exportで書き出すエピソードの一覧
+SECTOR_MIN = 10  # --vs-sector: 業種平均を出すのに必要な最少の銘柄数（これ未満の業種は判定しない）
 MISSED_TYPES = ["データ不足", "POが続いていた（押し目からの再加速）", "200EMAより下から反発", "急騰型", "その他"]
 MISSED_REASONS = ["PO新規は出たがRSがマイナス", "判定の幅より後にシグナル", "PO成立中で新規にならず", "POにならなかった"]
 
 
-def find_episodes(excess, starts):
-    # 起点ごとの勝ち銘柄を、同じ銘柄の続く起点（前の起点から60営業日以内）でまとめて1件のエピソードにする
+def max_drawdown_ahead(close, horizon):
+    # 各日からhorizon営業日後までの、終値の最大の下落幅（正の値。期間がデータの終わりを越える日はNaN）
+    values = close.to_numpy()
+    out = np.full(values.shape, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # データのない銘柄（すべてNaN）の警告を抑える
+        for i in range(len(values) - horizon):
+            w = values[i:i + horizon + 1]
+            out[i] = np.nanmax(1 - w / np.fmax.accumulate(w, axis=0), axis=0)
+    return pd.DataFrame(out, index=close.index, columns=close.columns)
+
+
+def find_episodes(excess, winner, starts, horizon):
+    # 起点ごとの勝ち銘柄を、同じ銘柄の続く起点（前の起点からhorizon営業日以内）でまとめて1件のエピソードにする
     positions = {d: excess.index.get_loc(d) for d in starts}
     episodes, latest = [], {}
     for d in starts:
         row = excess.loc[d]
-        for ticker, r in row[row >= WIN_THRESHOLD].items():
+        for ticker, r in row[winner.loc[d]].items():
             ep = latest.get(ticker)
-            if ep and positions[d] - ep["last_pos"] <= HORIZON:
+            if ep and positions[d] - ep["last_pos"] <= horizon:
                 ep["last_pos"] = positions[d]
                 ep["max_excess"] = max(ep["max_excess"], r)
                 ep["n_starts"] += 1
@@ -82,7 +99,7 @@ def analyze_episode(ep, data):
     n = len(close)
 
     # 安値日: 最初の起点のLOW_LOOKBACK営業日前から高値日までで終値が最も安い日／高値日: エピソードの期間内で最も高い日
-    end = min(ep["last_pos"] + HORIZON, n - 1)
+    end = min(ep["last_pos"] + data["horizon"], n - 1)
     high_pos = ep["first_pos"] + int(np.nanargmax(close[ep["first_pos"]:end + 1]))
     lo_start = max(ep["first_pos"] - LOW_LOOKBACK, 0)
     low_pos = lo_start + int(np.nanargmin(close[lo_start:high_pos + 1]))
@@ -98,7 +115,7 @@ def analyze_episode(ep, data):
         "大化け": ep["max_excess"] >= BIG_THRESHOLD,
         "最初の起点": data["dates"][ep["first_pos"]],
         "起点の数": ep["n_starts"],
-        "最大の60日超過リターン(%)": round(ep["max_excess"] * 100, 1),
+        "最大の超過リターン(%)": round(ep["max_excess"] * 100, 1),
         "安値日": data["dates"][low_pos],
         "高値日": data["dates"][high_pos],
         "安値から高値の上昇率(%)": round((high / low - 1) * 100, 1),
@@ -146,13 +163,26 @@ def analyze_episode(ep, data):
     return row
 
 
-def baseline_capture(excess, starts, data):
+def sector_excess_return(close, horizon, sector_of):
+    # horizon営業日後までの騰落率の、同じ業種の他の銘柄（自分を除く）の中央値に対する超過分
+    ret = close.shift(-horizon) / close - 1
+    out = pd.DataFrame(np.nan, index=close.index, columns=close.columns)
+    for _, members in close.columns.to_series().groupby(sector_of.reindex(close.columns)):
+        if len(members) < SECTOR_MIN:
+            continue
+        for t in members:
+            out[t] = ret[t] - ret[members.drop(t)].median(axis=1)
+    return out
+
+
+def baseline_capture(excess, winner, valid, starts, data):
     # 勝ち銘柄でない銘柄・起点を1件ずつのエピソードとみなし、同じ手順で捕捉を判定する（偶然の捕捉率）
+    # validは判定できる銘柄・起点（超過リターンが出せるもの）
     rows = []
     for d in starts:
         row = excess.loc[d]
         pos = excess.index.get_loc(d)
-        for ticker, r in row[row < WIN_THRESHOLD].items():
+        for ticker, r in row[valid.loc[d] & ~winner.loc[d]].items():
             res = analyze_episode({"ticker": ticker, "first_pos": pos, "last_pos": pos, "max_excess": r, "n_starts": 1}, data)
             rows.append({"捕捉": res["捕捉"], "RS上位10%入り": res["RS上位10%入り"]})
     return pd.DataFrame(rows)
@@ -179,7 +209,15 @@ def summarize(df, label):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--export", action="store_true", help=f"エピソードの一覧を{EXPORT_FILE.name}に書き出す")
+    parser.add_argument("--steady", action="store_true",
+                        help=f"勝ち銘柄を着実に上がる型（{STEADY_HORIZON}営業日で超過+30%%以上、最大の下落幅{STEADY_MAX_DD * 100:.0f}%%以内）で判定する")
+    parser.add_argument("--vs-sector", action="store_true",
+                        help=f"業種平均（自分を除いた中央値）に対しても+30%%以上を条件に加える（{SECTOR_MIN}銘柄未満の業種は対象外）")
     args = parser.parse_args()
+    horizon = STEADY_HORIZON if args.steady else HORIZON
+    export_file = STEADY_EXPORT_FILE if args.steady else EXPORT_FILE
+    if args.vs_sector:
+        export_file = export_file.with_name(f"{export_file.stem}_sector.csv")
 
     close_wide, _ = load_wide(with_history=True)
     tickers = [t for t in liquidity_passed_tickers(ROOT / "screening_result.csv") if t in close_wide.columns]
@@ -201,40 +239,52 @@ def main():
         "ema200": close.ewm(span=200, adjust=False).mean(),
         "high52": close.rolling(250, min_periods=1).max(),
         "n_obs": close.notna().cumsum(),
+        "horizon": horizon,
     }
 
-    excess = forward_excess_return(close, bench, HORIZON)
+    excess = forward_excess_return(close, bench, horizon)
+    winner = excess >= WIN_THRESHOLD
+    definition = f"{horizon}日超過+{WIN_THRESHOLD:.0%}以上"
+    if args.steady:
+        winner &= max_drawdown_ahead(close, horizon) <= STEADY_MAX_DD
+        definition += f"、最大の下落幅{STEADY_MAX_DD:.0%}以内"
+    sectors = pd.read_csv(ROOT / "universe.csv").set_index("ticker")
+    valid = excess.notna()
+    if args.vs_sector:
+        sector_ex = sector_excess_return(close, horizon, sectors["33業種区分"])
+        winner &= sector_ex >= WIN_THRESHOLD
+        valid &= sector_ex.notna()
+        definition += f"、業種平均に対しても+{WIN_THRESHOLD:.0%}以上"
     first_days = close.index.to_series().groupby(close.index.to_period("M")).first()
     starts = [d for d in first_days if d >= pd.Timestamp(JUDGE_FROM) and excess.loc[d].notna().any()]
-    episodes = find_episodes(excess, starts)
+    episodes = find_episodes(excess, winner, starts, horizon)
     df = pd.DataFrame([analyze_episode(ep, data) for ep in episodes])
-    sectors = pd.read_csv(ROOT / "universe.csv").set_index("ticker")
     df.insert(1, "銘柄名", df["ticker"].map(sectors["銘柄名"]))
     df.insert(2, "業種", df["ticker"].map(sectors["33業種区分"]))
 
-    n_winners = sum(int((excess.loc[d] >= WIN_THRESHOLD).sum()) for d in starts)
+    n_winners = sum(int(winner.loc[d].sum()) for d in starts)
     print(f"対象: 流動性フィルタ通過{len(tickers)}銘柄、起点 {starts[0]:%Y-%m}〜{starts[-1]:%Y-%m}（{len(starts)}か月）")
-    print(f"勝ち銘柄（60日超過+{WIN_THRESHOLD:.0%}以上）: 起点ごとに数えて{n_winners}件 → 同じ上昇をまとめて{len(df)}エピソード")
+    print(f"勝ち銘柄（{definition}）: 起点ごとに数えて{n_winners}件 → 同じ上昇をまとめて{len(df)}エピソード")
     summarize(df, f"勝ち銘柄（+{WIN_THRESHOLD:.0%}以上）")
     summarize(df[df["大化け"]], f"大化け（+{BIG_THRESHOLD:.0%}以上）")
 
-    base_df = baseline_capture(excess, starts, data)
+    base_df = baseline_capture(excess, winner, valid, starts, data)
     print(f"\n■ 偶然の捕捉率（勝ち銘柄でない銘柄・起点 {len(base_df)}件に同じ判定）")
     print(f"  PO新規+RSプラス {base_df['捕捉'].mean():.1%}／RS上位10%入り {base_df['RS上位10%入り'].mean():.1%}")
 
-    # だましの側（参考）: シグナルが出た銘柄・日のうち、その後60営業日で勝ち銘柄の水準に届いた割合
+    # だましの側（参考）: シグナルが出た銘柄・日のうち、その後に勝ち銘柄の水準に届いた割合
     judged = excess.index >= pd.Timestamp(JUDGE_FROM)
-    base = excess[judged].stack().dropna()
-    sig_ex = excess[judged].where(signal[judged]).stack().dropna()
-    print(f"\n■ 参考: 60営業日後の超過リターンが+{WIN_THRESHOLD:.0%}以上になる割合")
-    print(f"  全銘柄・全日 {(base >= WIN_THRESHOLD).mean():.1%}（{len(base)}件）／"
-          f"PO新規+RSプラスのシグナル {(sig_ex >= WIN_THRESHOLD).mean():.1%}（{len(sig_ex)}件）")
+    hit = winner.astype(float).where(valid)[judged]
+    base = hit.stack().dropna()
+    sig_hit = hit.where(signal[judged]).stack().dropna()
+    print(f"\n■ 参考: 勝ち銘柄の水準（{definition}）に届く割合")
+    print(f"  全銘柄・全日 {base.mean():.1%}（{len(base)}件）／PO新規+RSプラスのシグナル {sig_hit.mean():.1%}（{len(sig_hit)}件）")
 
     if args.export:
-        df.sort_values(["最初の起点", "最大の60日超過リターン(%)"], ascending=[True, False]).to_csv(
-            EXPORT_FILE, index=False, encoding="utf-8-sig"  # Excelで文字化けしないようBOM付き
+        df.sort_values(["最初の起点", "最大の超過リターン(%)"], ascending=[True, False]).to_csv(
+            export_file, index=False, encoding="utf-8-sig"  # Excelで文字化けしないようBOM付き
         )
-        print(f"\nエピソードの一覧を{EXPORT_FILE.relative_to(ROOT)}に書き出しました（{len(df)}件）")
+        print(f"\nエピソードの一覧を{export_file.relative_to(ROOT)}に書き出しました（{len(df)}件）")
 
 
 if __name__ == "__main__":

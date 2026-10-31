@@ -63,12 +63,17 @@ def entered_rs_top_within(rs, days, top_pct):
     return entered
 
 
+def is_rate(label):
+    # 0/1の結果（割合で集計する列）か
+    return label.startswith(f"{RS_TOP_WITHIN}日以内") or label.endswith("以上")
+
+
 def summarize(name, signal, outcomes, n_days):
     mask = signal.to_numpy(dtype=bool)
     row = {"シグナル": name, "件数": int(mask.sum()), "1日あたり": round(mask.sum() / n_days, 1)}
     for label, values in outcomes.items():
         v = pd.Series(values.to_numpy()[mask]).dropna()
-        if label.startswith(f"{RS_TOP_WITHIN}日以内"):
+        if is_rate(label):
             row[f"{label}(%)"] = round(v.mean() * 100, 1)
         else:
             row[f"{label} 平均(%)"] = round(v.mean() * 100, 1)
@@ -78,7 +83,9 @@ def summarize(name, signal, outcomes, n_days):
     return row
 
 
-MONTHLY_SIGNALS = ["ゴールデンクロス(5/25)", "PO新規", "PO新規+RSプラス"]  # 月別に比べるシグナル
+MONTHLY_SIGNALS = [
+    "ゴールデンクロス(5/25)", "PO新規", "PO新規+RSプラス", "押し目再加速A: PO再開+高値圏", "押し目再加速B: 25EMA押し後の10日高値",
+]  # 月別に比べるシグナル
 
 
 def monthly_summary(signals, outcome, metric):
@@ -118,7 +125,7 @@ def export_signals(signal, close, rs, outcomes, path, features, labels):
     df["RSプラス"] = rs_at > 0
     for label, values in outcomes.items():
         v = values.stack().reindex(hits).to_numpy()
-        if label.startswith(f"{RS_TOP_WITHIN}日以内"):
+        if is_rate(label):
             df[label] = pd.array(v, dtype="Int64")  # 1/0、期間が未到来なら空欄
         else:
             df[f"{label}(%)"] = (v * 100).round(2)  # 期間が未到来なら空欄
@@ -133,6 +140,10 @@ def export_signals(signal, close, rs, outcomes, path, features, labels):
 
 EMA200_MIN_DAYS = 200  # 200EMAを使うのは、銘柄ごとにデータ開始からこの営業日数以降（初日の終値の重みが約13%以下になる）
 CROSS_WITHIN = 20  # 200EMAより下で成立した銘柄が、この営業日数以内に上抜けたかを見る
+PULLBACK_DAYS = 10  # 押し目を探す営業日数（高値更新もこの日数で判定）
+PULLBACK_TOUCH = 0.02  # 終値が25EMAのこの割合以内まで下がった日があれば「25EMA付近まで押した」とみなす
+NEAR_HIGH = 0.15  # 52週高値からこの割合以内を「高値圏」とみなす
+WIN_THRESHOLD = 0.30  # winner_study.pyの勝ち銘柄と同じ基準
 
 
 def ema200_study(fresh, close, bench):
@@ -334,16 +345,29 @@ def main():
     ema75_up = ema75 > ema75.shift(SLOPE_DAYS)
     rs = relative_strength_wide(close_wide)[tickers]
 
+    ema200 = close.ewm(span=200, adjust=False).mean()
+    high52 = close.rolling(250, min_periods=1).max()
+    # 押し目からの再加速の共通条件: 200EMAより上・52週高値から15%以内・25EMA>75EMA・RSプラス
+    uptrend = (usable & (close.notna().cumsum() >= EMA200_MIN_DAYS) & (close > ema200)
+               & (close >= high52 * (1 - NEAR_HIGH)) & (ema25 > ema75) & (rs > 0))
+    touched = (close <= ema25 * (1 + PULLBACK_TOUCH)).astype(float).rolling(PULLBACK_DAYS, min_periods=1).max().shift(1) > 0
+    range_high = close.rolling(PULLBACK_DAYS, min_periods=1).max()
+    breakout = (close >= range_high) & ~(close.shift(1) >= range_high.shift(1))
+
     signals = {
         "ゴールデンクロス(5/25)": gc,
         "PO新規": fresh,
         "PO新規+75EMA上向き": fresh & ema75_up,
         "PO新規+RSプラス": fresh & (rs > 0),
         "PO再開（参考）": po_start & po_recent,
+        "押し目再加速A: PO再開+高値圏": po_start & po_recent & uptrend,
+        "押し目再加速B: 25EMA押し後の10日高値": breakout & touched & uptrend,
     }
     outcomes = {f"{RS_TOP_WITHIN}日以内にRS上位{RS_TOP_PCT:.0%}入り": entered_rs_top_within(rs, RS_TOP_WITHIN, RS_TOP_PCT)}
     for h in HORIZONS:
         outcomes[f"{h}日超過リターン"] = forward_excess_return(close, bench, h)
+    excess60 = outcomes["60日超過リターン"]
+    outcomes[f"60日超過+{WIN_THRESHOLD:.0%}以上"] = (excess60 >= WIN_THRESHOLD).astype(float).where(excess60.notna())
 
     n_days = int(usable.any(axis=1).sum())
     period = usable.index[usable.any(axis=1)]

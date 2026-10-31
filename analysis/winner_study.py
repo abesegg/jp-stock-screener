@@ -46,6 +46,7 @@ GAP_UP = 0.10  # 安値日から高値日までに、1日でこれ以上上が�
 RS_TOP_PCT = 0.10  # RS上位の基準（rs_ranking.csvと同じ上位10%）
 EXPORT_FILE = ROOT / "analysis" / "winner_episodes.csv"  # --exportで書き出すエピソードの一覧
 MISSED_TYPES = ["データ不足", "POが続いていた（押し目からの再加速）", "200EMAより下から反発", "急騰型", "その他"]
+MISSED_REASONS = ["PO新規は出たがRSがマイナス", "判定の幅より後にシグナル", "PO成立中で新規にならず", "POにならなかった"]
 
 
 def find_episodes(excess, starts):
@@ -77,6 +78,7 @@ def analyze_episode(ep, data):
     t = ep["ticker"]
     close, signal, rs_top, po = (data[k][t].to_numpy() for k in ["close", "signal", "rs_top", "po"])
     ema200, high52, rs_rank = (data[k][t].to_numpy() for k in ["ema200", "high52", "rs_rank"])
+    fresh = data["fresh"][t].to_numpy()
     n = len(close)
 
     # 安値日: 最初の起点のLOW_LOOKBACK営業日前から高値日までで終値が最も安い日／高値日: エピソードの期間内で最も高い日
@@ -129,7 +131,31 @@ def analyze_episode(ep, data):
         row["見逃しの型"] = MISSED_TYPES[3]
     else:
         row["見逃しの型"] = MISSED_TYPES[4]
+
+    # 見逃した直接の理由（上から順に、最初に当てはまったもの）
+    if sig_pos is not None:
+        row["見逃しの理由"] = None
+    elif fresh[cap_lo:cap_hi + 1].any():
+        row["見逃しの理由"] = MISSED_REASONS[0]
+    elif high_pos > cap_hi and signal[cap_hi + 1:high_pos + 1].any():
+        row["見逃しの理由"] = MISSED_REASONS[1]
+    elif po[cap_lo:cap_hi + 1].any():
+        row["見逃しの理由"] = MISSED_REASONS[2]
+    else:
+        row["見逃しの理由"] = MISSED_REASONS[3]
     return row
+
+
+def baseline_capture(excess, starts, data):
+    # 勝ち銘柄でない銘柄・起点を1件ずつのエピソードとみなし、同じ手順で捕捉を判定する（偶然の捕捉率）
+    rows = []
+    for d in starts:
+        row = excess.loc[d]
+        pos = excess.index.get_loc(d)
+        for ticker, r in row[row < WIN_THRESHOLD].items():
+            res = analyze_episode({"ticker": ticker, "first_pos": pos, "last_pos": pos, "max_excess": r, "n_starts": 1}, data)
+            rows.append({"捕捉": res["捕捉"], "RS上位10%入り": res["RS上位10%入り"]})
+    return pd.DataFrame(rows)
 
 
 def summarize(df, label):
@@ -145,6 +171,9 @@ def summarize(df, label):
     missed = df[~df["捕捉"]]
     counts = missed["見逃しの型"].value_counts().reindex(MISSED_TYPES, fill_value=0)
     print("  見逃しの型: " + "、".join(f"{k} {v}件（{v / len(df):.0%}）" for k, v in counts.items()))
+    reasons = missed["見逃しの理由"].value_counts().reindex(MISSED_REASONS, fill_value=0)
+    print("  見逃しの理由: " + "、".join(f"{k} {v}件（{v / len(df):.0%}）" for k, v in reasons.items()))
+    print(pd.crosstab(missed["見逃しの型"], missed["見逃しの理由"]).to_string())
 
 
 def main():
@@ -159,10 +188,12 @@ def main():
 
     rs = relative_strength_wide(close_wide)[tickers]
     rs_rank = rs.rank(axis=1, pct=True)
-    signal = fresh_perfect_order_wide(close) & (rs > 0)
+    fresh = fresh_perfect_order_wide(close)
+    signal = fresh & (rs > 0)
     data = {
         "dates": close.index.strftime("%Y-%m-%d"),
         "close": close,
+        "fresh": fresh,
         "signal": signal,
         "rs_top": rs_rank > 1 - RS_TOP_PCT,
         "rs_rank": rs_rank,
@@ -186,6 +217,10 @@ def main():
     print(f"勝ち銘柄（60日超過+{WIN_THRESHOLD:.0%}以上）: 起点ごとに数えて{n_winners}件 → 同じ上昇をまとめて{len(df)}エピソード")
     summarize(df, f"勝ち銘柄（+{WIN_THRESHOLD:.0%}以上）")
     summarize(df[df["大化け"]], f"大化け（+{BIG_THRESHOLD:.0%}以上）")
+
+    base_df = baseline_capture(excess, starts, data)
+    print(f"\n■ 偶然の捕捉率（勝ち銘柄でない銘柄・起点 {len(base_df)}件に同じ判定）")
+    print(f"  PO新規+RSプラス {base_df['捕捉'].mean():.1%}／RS上位10%入り {base_df['RS上位10%入り'].mean():.1%}")
 
     # だましの側（参考）: シグナルが出た銘柄・日のうち、その後60営業日で勝ち銘柄の水準に届いた割合
     judged = excess.index >= pd.Timestamp(JUDGE_FROM)

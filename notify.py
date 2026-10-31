@@ -17,12 +17,18 @@ from pathlib import Path
 
 import pandas as pd
 
+from filters import WATCH_DAYS
 from jpx import download_jpx_list, list_date
 
 BASE_DIR = Path(__file__).parent
 FAILED_FILE = "daily_failed_tickers.txt"
+WATCH_FILE = "watch_list.csv"
 MAX_LEN = 2000  # Discordの1メッセージの上限文字数
 MAX_ITEMS = 10  # 新規銘柄の表示件数の上限
+WATCH_MIN_SHARE = 0.6  # RS上位にいた日の割合がこれ以上なら「居続けている」（analysis/trade_study.pyの監視型と同じ線）
+WATCH_MIN_ELAPSED = 5  # 「居続けている」の欄に出すのはこの営業日数目以降（日数が少なく割合だけ高い銘柄を除くため）
+WATCH_JUDGE_DAYS = (10, 20)  # 判定日（監視の開始から何営業日目か）
+WATCH_MAX_ITEMS = 5  # 「居続けている」の欄の表示件数の上限（新規が多い日も2000文字に収めるため）
 
 
 def load_env():
@@ -71,16 +77,43 @@ def new_entries(filename, base):
     return current, current[~current["ticker"].isin(previous["ticker"])]
 
 
-def format_items(df, fmt):
-    lines = [fmt(row) for _, row in df.head(MAX_ITEMS).iterrows()]
-    if len(df) > MAX_ITEMS:
-        lines.append(f"　…ほか{len(df) - MAX_ITEMS}銘柄")
+def format_items(df, fmt, max_items=MAX_ITEMS):
+    lines = [fmt(row) for _, row in df.head(max_items).iterrows()]
+    if len(df) > max_items:
+        lines.append(f"　…ほか{len(df) - max_items}銘柄")
     return lines
 
 
 def format_rs(value):
     # 最新日の終値が未反映の銘柄はRSを計算できず空欄になるため「-」と表示する
     return f"RS {value:+.1%}" if pd.notna(value) else "RS -"
+
+
+def format_watch(r):
+    return (
+        f"・{r['ticker']} {r['銘柄名']}（{r['33業種区分']}）"
+        f"PO {pd.Timestamp(r['po_date']):%m/%d}・{r['elapsed']}日目 RS上位 {r['rs_top_days']}/{r['elapsed']}日 {format_rs(r['relative_strength'])}"
+    )
+
+
+def watch_lines():
+    """監視中の欄（判定日の銘柄と、RS上位に居続けている銘柄）"""
+    watch = pd.read_csv(BASE_DIR / WATCH_FILE)
+    staying = watch[(watch["rs_top_share"] >= WATCH_MIN_SHARE) & (watch["elapsed"] >= WATCH_MIN_ELAPSED)]
+    judged = staying[staying["elapsed"].isin(WATCH_JUDGE_DAYS)]
+    ended = watch[(watch["elapsed"] == WATCH_DAYS) & (watch["rs_top_share"] < WATCH_MIN_SHARE)]
+    lines = ["", f"**監視中**: {len(watch)}銘柄（RS上位に居続け {len(staying)}）"]
+    if len(judged) or len(ended):
+        lines.append("🔔 判定日")
+        lines += format_items(judged, format_watch)
+        if len(ended):
+            lines.append(f"・{WATCH_DAYS}日目で{WATCH_MIN_SHARE:.0%}未満のため監視終了: {len(ended)}銘柄")
+    others = staying.drop(judged.index)
+    if len(others):
+        lines.append(f"居続けている銘柄（{WATCH_MIN_ELAPSED}日目以降、RS上位にいた日が{WATCH_MIN_SHARE:.0%}以上）")
+        lines += format_items(others, format_watch, WATCH_MAX_ITEMS)
+    lines.append("※参考情報（買いの合図ではない）")
+    return lines
 
 
 def jpx_update_notice():
@@ -110,11 +143,12 @@ def build_success_message(base, dashboard_url):
         lambda r: f"・{r['ticker']} {r['銘柄名']}（{r['33業種区分']}）RS {r['relative_strength']:+.1%}",
     )
     lines.append("")
-    lines.append(f"**PO転換**: {len(po)}銘柄（新規 {len(po_new)}）")
+    lines.append(f"**監視開始（PO新規）**: {len(po)}銘柄（新規 {len(po_new)}）")
     lines += format_items(
         po_new,
         lambda r: f"・{r['ticker']} {r['銘柄名']}（{r['33業種区分']}）{r['po_date']} {format_rs(r['relative_strength'])}",
     )
+    lines += watch_lines()
     missing = read_missing_all((BASE_DIR / FAILED_FILE).read_text(encoding="utf-8"))
     if missing:
         previous = git_show(base, FAILED_FILE)

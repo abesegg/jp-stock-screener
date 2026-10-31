@@ -8,6 +8,8 @@ GOLDEN_CROSS_LOOKBACK = 3
 EMA_WARMUP_DAYS = 63  # 銘柄ごとに、データ開始からこの営業日数はEMAの助走期間として判定に使わない
 PO_FRESH_DAYS = 20  # 直前のこの営業日数にパーフェクトオーダーでなかった銘柄の成立を「新規」とする
 PO_LOOKBACK = 5  # 直近この営業日数以内の新規成立を抽出する（1日約8件のため、ゴールデンクロスの3日より広げている）
+RS_TOP_PCT = 0.10  # RS上位の基準。その日の流動性フィルタ通過銘柄の中で順位が上位10%（analysis/の検証と同じ定義）
+WATCH_DAYS = 20  # PO新規+RSプラスの翌日からこの営業日数目までを「監視中」とする
 
 
 def liquidity_passed_tickers(screening_result_path="screening_result.csv"):
@@ -118,3 +120,24 @@ def fresh_perfect_order_tickers(tickers, close_wide, benchmark_ticker=BENCHMARK_
     rs = relative_strength_wide(close_wide, benchmark_ticker)[available]
     signal = (fresh_perfect_order_wide(close_wide[available]) & (rs > 0)).tail(lookback)
     return {t: signal[t][signal[t]].index[-1] for t in signal.columns if signal[t].any()}
+
+
+def watch_list(tickers, close_wide, benchmark_ticker=BENCHMARK_TICKER, days=WATCH_DAYS, top_pct=RS_TOP_PCT):
+    # PO新規+RSプラスから1〜days営業日目の銘柄と、成立の翌日から最新日までにRS上位にいた日数
+    # → DataFrame（ticker, po_date, elapsed, rs_top_days, rs_top_share）
+    # 新規成立は直前PO_FRESH_DAYS営業日にPOでないことが条件のため、days+1日の窓に同じ銘柄の成立は1回しかない
+    available = [t for t in tickers if t in close_wide.columns]
+    rs = relative_strength_wide(close_wide, benchmark_ticker)[available]
+    signal = (fresh_perfect_order_wide(close_wide[available]) & (rs > 0)).tail(days + 1)
+    top = (rs.rank(axis=1, pct=True) > 1 - top_pct).tail(days + 1)  # RSが計算できない日は上位に数えない
+    rows = []
+    for t in signal.columns:
+        if not signal[t].any():
+            continue
+        po_date = signal[t][signal[t]].index[-1]
+        after = top[t][top.index > po_date]
+        if after.empty:  # 成立日の当日はPO転換の「新規」と同じため除く
+            continue
+        rows.append({"ticker": t, "po_date": po_date, "elapsed": len(after),
+                     "rs_top_days": int(after.sum()), "rs_top_share": after.mean()})
+    return pd.DataFrame(rows, columns=["ticker", "po_date", "elapsed", "rs_top_days", "rs_top_share"])

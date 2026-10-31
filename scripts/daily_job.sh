@@ -27,7 +27,7 @@ uv run python run_screening.py
 uv run python run_golden_cross.py
 uv run python run_perfect_order.py
 
-git add daily_ohlcv.csv daily_failed_tickers.txt rs_ranking.csv golden_cross.csv perfect_order.csv
+git add daily_ohlcv.csv daily_failed_tickers.txt rs_ranking.csv golden_cross.csv perfect_order.csv watch_list.csv
 if git diff --cached --quiet; then
     echo "変更なしのためcommitをスキップ"
 else

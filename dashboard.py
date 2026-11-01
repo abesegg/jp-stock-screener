@@ -4,10 +4,11 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from filters import (
-    BENCHMARK_TICKER, GOLDEN_CROSS_SHORT, PO_LOOKBACK, RS_PERIOD,
-    above_ema_wide, fresh_perfect_order_tickers, liquidity_passed_tickers, load_close_wide,
-    relative_strength, relative_strength_series, relative_strength_wide, sector_breadth,
+    BENCHMARK_TICKER, EMA_WARMUP_DAYS, GOLDEN_CROSS_SHORT, PO_FRESH_DAYS, PO_LOOKBACK, RS_PERIOD, RS_TOP_PCT, WATCH_DAYS,
+    above_ema_wide, fresh_perfect_order_tickers, fresh_perfect_order_wide, liquidity_passed_tickers, load_close_wide,
+    relative_strength, relative_strength_series, relative_strength_wide, sector_breadth, watch_list,
 )
+from notify import WATCH_MIN_ELAPSED, WATCH_MIN_SHARE
 
 st.set_page_config(page_title="日本株 スクリーニング", page_icon="📈", layout="wide")
 
@@ -26,6 +27,12 @@ BREADTH_METRICS = {
 }
 SMALL_SECTOR = 10  # 銘柄数がこれ未満の業種は割合が振れやすいため※を付けて表示
 CANDIDATE_COUNT = 9  # 業種内候補タブに並べる銘柄数（3列×3行）
+HIGHLIGHT_STYLE = "color: #1565C0; font-weight: bold"  # リストで強調する行の文字色
+RS_THRESHOLD_COLOR = "#9E9E9E"  # RSチャートのRS上位の境目の線
+PO_MARK_COLOR = "#FF9800"  # チャートのPO成立日の線と監視期間の塗り
+ENTRY_MARK_COLOR = "#7E57C2"  # チャートのRS上位入り日の線
+GC_MARK_COLOR = "#00E676"  # チャートのゴールデンクロスの印（ローソク足に埋もれないよう明るめ）
+DC_MARK_COLOR = "#FF4081"  # チャートのデッドクロスの印（陰線の赤と区別するためピンク寄り）
 
 
 @st.cache_data(ttl=600)
@@ -83,6 +90,42 @@ def load_latest_rs():
 
 
 @st.cache_data(ttl=600)
+def load_rs_top():
+    # 流動性フィルタ通過銘柄の日ごとのRS上位RS_TOP_PCTの判定（watch_list()・analysis/と同じ定義。RSが計算できない日は上位に数えない）と、
+    # その日の境目（上位に入った銘柄のRSの最小値。RSが境目以上なら上位）
+    close_wide = load_close_wide_cached()
+    tickers = [t for t in liquidity_passed_tickers() if t in close_wide.columns]
+    rs = relative_strength_wide(close_wide)[tickers]
+    top = rs.rank(axis=1, pct=True) > 1 - RS_TOP_PCT
+    return top, rs.where(top).min(axis=1)
+
+
+@st.cache_data(ttl=600)
+def load_rs_entry():
+    # 最新日にRS上位にいる銘柄の、上位に初めて入った日（直前PO_FRESH_DAYS営業日に上位にいなかった日。analysis/rs_entry_study.pyと同じ）と、
+    # その日からの経過営業日数（入った日が1日目。検証の「n日目」はn+1日目に当たる。途中で上位を出てもリセットしない）・上位にいた日数
+    top, _ = load_rs_top()
+    recent = top.shift(1, fill_value=False).rolling(PO_FRESH_DAYS, min_periods=1).max().astype(bool)
+    first = top & ~recent
+    rows = []
+    for t in top.columns[top.iloc[-1]]:
+        entry = first.index[first[t]][-1]
+        after = top[t][top.index >= entry]
+        rows.append({"ticker": t, "entry_date": entry.strftime("%Y-%m-%d"),
+                     "entry_elapsed": len(after), "entry_top_days": int(after.sum())})
+    return pd.DataFrame(rows, columns=["ticker", "entry_date", "entry_elapsed", "entry_top_days"])
+
+
+@st.cache_data(ttl=600)
+def load_last_fresh_po():
+    # 流動性フィルタ通過銘柄の最後のPO新規の日（振り返り用のためRSの条件は付けない。助走期間中などで新規成立がない銘柄は含まない）
+    close_wide = load_close_wide_cached()
+    tickers = [t for t in liquidity_passed_tickers() if t in close_wide.columns]
+    fresh = fresh_perfect_order_wide(close_wide[tickers])
+    return fresh.apply(lambda s: s.index[s][-1] if s.any() else pd.NaT).dropna().dt.strftime("%Y-%m-%d")
+
+
+@st.cache_data(ttl=600)
 def load_perfect_order():
     # 直近PO_LOOKBACK営業日以内にパーフェクトオーダーが新規成立し、成立日のRSがプラスの銘柄（成立日の新しい順、同日はRSの高い順）
     signals = fresh_perfect_order_tickers(liquidity_passed_tickers(), load_close_wide_cached())
@@ -93,6 +136,17 @@ def load_perfect_order():
     universe = pd.read_csv(UNIVERSE_FILE)[["ticker", "銘柄名", "33業種区分"]]
     df = df.merge(universe, on="ticker", how="left")
     return df.sort_values(["po_date", "rs"], ascending=[False, False])
+
+
+@st.cache_data(ttl=600)
+def load_watch_list():
+    # PO新規+RSプラスから1〜WATCH_DAYS営業日目の銘柄と、RS上位にいた日数・割合（経過日数の長い順、同日は割合の高い順）
+    df = watch_list(liquidity_passed_tickers(), load_close_wide_cached())
+    df["po_date"] = df["po_date"].dt.strftime("%Y-%m-%d")
+    df["rs"] = df["ticker"].map(load_latest_rs())
+    universe = pd.read_csv(UNIVERSE_FILE)[["ticker", "銘柄名", "33業種区分"]]
+    df = df.merge(universe, on="ticker", how="left")
+    return df.sort_values(["elapsed", "rs_top_share"], ascending=[False, False])
 
 
 def data_as_of(ohlcv):
@@ -130,7 +184,8 @@ def add_ema_ribbon(fig, dates, fast, slow):
         ), row=1, col=1)
 
 
-def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_rs=True, height=600, title=None):
+def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_rs=True, height=600, title=None,
+                 po_date=None, shade_watch=False, entry_date=None):
     full_data = ohlcv[ohlcv["ticker"] == ticker].sort_values("date")
 
     if full_data.empty:
@@ -144,8 +199,15 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
     ema75 = full_data["close"].ewm(span=75, adjust=False).mean()
     ema200 = full_data["close"].ewm(span=200, adjust=False).mean()
     rolling_std = full_data["close"].rolling(25).std()
+    # ゴールデンクロス・デッドクロス（5EMAが25EMAを下から上・上から下に抜けた日。golden_cross_tickers()と同じ判定）。助走期間は除く
+    ema_gap = ema_short - ema25
+    golden_cross = (ema_gap.shift(1) <= 0) & (ema_gap > 0)
+    dead_cross = (ema_gap.shift(1) >= 0) & (ema_gap < 0)
+    golden_cross.iloc[:EMA_WARMUP_DAYS] = False
+    dead_cross.iloc[:EMA_WARMUP_DAYS] = False
     if show_rs:
         rs_series = relative_strength_series(ticker, close_wide, BENCHMARK_TICKER, RS_PERIOD)
+        _, rs_threshold = load_rs_top()
 
     if display_days is not None:
         cutoff = full_data["date"].max() - pd.Timedelta(days=display_days)
@@ -157,8 +219,11 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
         ema75 = ema75[mask]
         ema200 = ema200[mask]
         rolling_std = rolling_std[mask]
+        golden_cross = golden_cross[mask]
+        dead_cross = dead_cross[mask]
         if show_rs:
             rs_series = rs_series[rs_series.index >= cutoff]
+            rs_threshold = rs_threshold[rs_threshold.index >= cutoff]
     else:
         ticker_data = full_data
 
@@ -212,7 +277,27 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
             showlegend=False,
         ), row=1, col=1)
 
+    # ゴールデンクロスはローソク足の下に▲、デッドクロスは上に▼で示す
+    for cross, price, offset, symbol, color, label in [
+        (golden_cross, "low", 0.97, "triangle-up", GC_MARK_COLOR, "GC"),
+        (dead_cross, "high", 1.03, "triangle-down", DC_MARK_COLOR, "DC"),
+    ]:
+        cross_days = ticker_data[cross]
+        fig.add_trace(go.Scatter(
+            x=cross_days["date"], y=cross_days[price] * offset, mode="markers", name=label,
+            marker=dict(symbol=symbol, size=8, color=color),
+            hovertemplate=f"{label} %{{x|%m/%d}}<extra></extra>",
+        ), row=1, col=1)
+
     if show_rs:
+        # RS上位の境目（RSの線が上にあればその日は上位）。RSの線の下に来るよう先に描く
+        fig.add_trace(go.Scatter(
+            x=rs_threshold.index,
+            y=rs_threshold.values * 100,
+            mode="lines",
+            name=f"RS上位{RS_TOP_PCT:.0%}の境目",
+            line=dict(color=RS_THRESHOLD_COLOR, width=1, dash="dash"),
+        ), row=2, col=1)
         fig.add_trace(go.Scatter(
             x=rs_series.index,
             y=rs_series.values * 100,
@@ -221,6 +306,22 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
             line=dict(color="#1f77b4"),
         ), row=2, col=1)
         fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
+
+    if po_date is not None:
+        # PO成立日の縦線と、監視中なら成立日から最新日までの薄い塗り（成立日が表示範囲より前なら縦線は省き、塗りは表示範囲の先頭から）
+        po_date = pd.Timestamp(po_date)
+        first_day, last_day = ticker_data["date"].min(), ticker_data["date"].max()
+        for row in ((1, 2) if show_rs else (1,)):
+            if po_date >= first_day:
+                fig.add_vline(x=po_date, line_dash="dot", line_color=PO_MARK_COLOR, line_width=1.5, row=row, col=1)
+            if shade_watch:
+                fig.add_vrect(x0=max(po_date, first_day), x1=last_day, fillcolor=PO_MARK_COLOR, opacity=0.08,
+                              line_width=0, row=row, col=1)
+    if entry_date is not None and pd.Timestamp(entry_date) >= ticker_data["date"].min():
+        # RS上位に初めて入った日の縦線
+        for row in ((1, 2) if show_rs else (1,)):
+            fig.add_vline(x=pd.Timestamp(entry_date), line_dash="dot", line_color=ENTRY_MARK_COLOR, line_width=1.5,
+                          row=row, col=1)
 
     # 休場日（土日・祝日）や売買停止日を詰めて表示するため、データのない日をx軸から除外する
     all_days = pd.date_range(ticker_data["date"].min(), ticker_data["date"].max())
@@ -244,7 +345,8 @@ def to_tradingview_watchlist(tickers):
     return ",".join(f"TSE:{t.removesuffix('.T')}" for t in tickers)
 
 
-def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days, download_name):
+def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days, download_name, highlight=None,
+                         po_date_col=None, shade_watch=False, entry_date_col=None):
     if display_df.empty:
         st.info("該当する銘柄はありません")
         return
@@ -253,8 +355,14 @@ def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days
 
     with col_list:
         st.subheader("リスト")
+        # highlight（display_dfと同じindexのbool）がTrueの行を強調する。Stylerは小数を6桁で表示するため桁を指定する
+        table = display_df
+        if highlight is not None:
+            table = display_df.style.apply(
+                lambda row: [HIGHLIGHT_STYLE if highlight[row.name] else ""] * len(row), axis=1
+            ).format(precision=2, na_rep="")
         event = st.dataframe(
-            display_df,
+            table,
             width="stretch",
             height=600,
             hide_index=True,
@@ -277,7 +385,12 @@ def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days
 
     with col_chart:
         st.subheader("日足チャート")
-        render_chart(selected_ticker, ohlcv, close_wide, key_prefix, display_days)
+        # 日付の列が空欄（NaN）の銘柄は印を付けない
+        selected = display_df.iloc[selected_idx]
+        po_date = selected[po_date_col] if po_date_col and pd.notna(selected[po_date_col]) else None
+        entry_date = selected[entry_date_col] if entry_date_col and pd.notna(selected[entry_date_col]) else None
+        render_chart(selected_ticker, ohlcv, close_wide, key_prefix, display_days,
+                     po_date=po_date, shade_watch=shade_watch, entry_date=entry_date)
 
 
 def render_breadth_tab(display_days):
@@ -435,8 +548,9 @@ as_of = data_as_of(ohlcv)
 st.caption(f"データ基準日: {as_of:%Y-%m-%d}（{'月火水木金土日'[as_of.weekday()]}）の終値")
 
 # 選択中のタブだけを実行する（既定では全タブを毎回描画するため、チャートの多いタブを足すと全操作が重くなる）
-tab_rs, tab_po, tab_golden, tab_breadth, tab_overview, tab_candidates = st.tabs(
-    ["RS上位", "PO転換", "ゴールデンクロス", "業種別", "業種俯瞰", "業種内候補"], key="main_tab", on_change="rerun"
+tab_rs, tab_po, tab_watch, tab_golden, tab_breadth, tab_overview, tab_candidates = st.tabs(
+    ["RS上位", "PO新規", "監視中", "ゴールデンクロス", "業種別", "業種俯瞰", "業種内候補"],
+    default="監視中", key="main_tab", on_change="rerun"
 )
 
 if tab_rs.open:
@@ -445,8 +559,15 @@ if tab_rs.open:
         st.caption(f"流動性フィルタ通過後、TOPIX(1306.T)に対する相対強度(21営業日)の上位{len(ranking)}銘柄")
         display_df = ranking.copy()
         display_df["RS(%)"] = (display_df["relative_strength"] * 100).round(2)
-        display_df = display_df[["33業種区分", "銘柄名", "ticker", "RS(%)"]].rename(columns={"33業種区分": "業種"})
-        render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days, f"rs_top_{as_of:%Y%m%d}.txt")
+        # 境目の1銘柄ほどはrs_ranking.csv（件数×10%を切り捨て）とload_rs_top()の上位がずれ、上位入りの列が空欄になる
+        display_df = display_df.merge(load_rs_entry(), on="ticker", how="left")
+        display_df["last_fresh_po"] = display_df["ticker"].map(load_last_fresh_po())
+        display_df = display_df[
+            ["33業種区分", "銘柄名", "ticker", "RS(%)", "entry_date", "entry_elapsed", "entry_top_days", "last_fresh_po"]
+        ].rename(columns={"33業種区分": "業種", "entry_date": "上位入り日", "entry_elapsed": "経過日数",
+                          "entry_top_days": "RS上位日数", "last_fresh_po": "PO新規日"})
+        render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days, f"rs_top_{as_of:%Y%m%d}.txt",
+                             po_date_col="PO新規日", shade_watch=True, entry_date_col="上位入り日")
 
 if tab_po.open:
     with tab_po:
@@ -457,10 +578,28 @@ if tab_po.open:
         )
         display_df = po.copy()
         display_df["RS(%)"] = (display_df["rs"] * 100).round(2)
-        display_df = display_df[["33業種区分", "銘柄名", "ticker", "po_date", "RS(%)"]].rename(
+        display_df = display_df[["33業種区分", "銘柄名", "ticker", "RS(%)", "po_date"]].rename(
             columns={"33業種区分": "業種", "po_date": "PO成立日"}
         )
-        render_screening_tab(display_df, "po", ohlcv, close_wide, display_days, f"perfect_order_{as_of:%Y%m%d}.txt")
+        render_screening_tab(display_df, "po", ohlcv, close_wide, display_days, f"perfect_order_{as_of:%Y%m%d}.txt",
+                             po_date_col="PO成立日")
+
+if tab_watch.open:
+    with tab_watch:
+        watch = load_watch_list()
+        st.caption(
+            f"PO新規+RSプラスの翌日から{WATCH_DAYS}営業日目までの{len(watch)}銘柄と、その間にRS上位{RS_TOP_PCT:.0%}にいた日数。"
+            f"青字は{WATCH_MIN_ELAPSED}日目以降でRS上位にいた日が{WATCH_MIN_SHARE:.0%}以上の銘柄。参考情報（買いの合図ではない）"
+        )
+        display_df = watch.copy()
+        display_df["RS上位(%)"] = (display_df["rs_top_share"] * 100).round().astype(int)
+        display_df["RS(%)"] = (display_df["rs"] * 100).round(2)
+        display_df = display_df[
+            ["33業種区分", "銘柄名", "ticker", "RS(%)", "po_date", "elapsed", "rs_top_days", "RS上位(%)"]
+        ].rename(columns={"33業種区分": "業種", "po_date": "PO成立日", "elapsed": "経過日数", "rs_top_days": "RS上位日数"})
+        staying = (watch["rs_top_share"] >= WATCH_MIN_SHARE) & (watch["elapsed"] >= WATCH_MIN_ELAPSED)
+        render_screening_tab(display_df, "watch", ohlcv, close_wide, display_days,
+                             f"watch_list_{as_of:%Y%m%d}.txt", highlight=staying, po_date_col="PO成立日", shade_watch=True)
 
 if tab_golden.open:
     with tab_golden:

@@ -308,15 +308,25 @@ def render_chart(ticker, ohlcv, close_wide, key_prefix, display_days=None, show_
         fig.add_hline(y=0, line_dash="dot", line_color="gray", row=2, col=1)
 
     if po_date is not None:
-        # PO成立日の縦線と、監視中なら成立日から最新日までの薄い塗り（成立日が表示範囲より前なら縦線は省き、塗りは表示範囲の先頭から）
+        # PO成立日の縦線（成立日が表示範囲より前なら省く）
         po_date = pd.Timestamp(po_date)
-        first_day, last_day = ticker_data["date"].min(), ticker_data["date"].max()
-        for row in ((1, 2) if show_rs else (1,)):
-            if po_date >= first_day:
+        rows = (1, 2) if show_rs else (1,)
+        if po_date >= ticker_data["date"].min():
+            for row in rows:
                 fig.add_vline(x=po_date, line_dash="dot", line_color=PO_MARK_COLOR, line_width=1.5, row=row, col=1)
-            if shade_watch:
-                fig.add_vrect(x0=max(po_date, first_day), x1=last_day, fillcolor=PO_MARK_COLOR, opacity=0.08,
-                              line_width=0, row=row, col=1)
+        if shade_watch:
+            # PO新規日以降でPOが成立している区間だけを塗る（崩れたところで途切れる。perfect_order_wide()と同じ判定）
+            po_held = ((ema_short > ema25) & (ema25 > ema75) & (ticker_data["date"] >= po_date)).tolist()
+            dates = ticker_data["date"].tolist()
+            start = None
+            for i, held in enumerate(po_held + [False]):
+                if held and start is None:
+                    start = i
+                elif not held and start is not None:
+                    for row in rows:
+                        fig.add_vrect(x0=dates[start], x1=dates[i - 1], fillcolor=PO_MARK_COLOR, opacity=0.08,
+                                      line_width=0, row=row, col=1)
+                    start = None
     if entry_date is not None and pd.Timestamp(entry_date) >= ticker_data["date"].min():
         # RS上位に初めて入った日の縦線
         for row in ((1, 2) if show_rs else (1,)):

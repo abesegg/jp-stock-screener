@@ -26,6 +26,7 @@ WATCH_FILE = "watch_list.csv"
 MAX_LEN = 2000  # Discordの1メッセージの上限文字数
 MAX_ITEMS = 10  # 新規銘柄の表示件数の上限
 WATCH_MIN_SHARE = 0.6  # RS上位にいた日の割合がこれ以上なら「居続けている」（analysis/trade_study.pyの監視型と同じ線）
+WATCH_KEEP_SHARE = 0.2  # 20日目にこれ以上・WATCH_MIN_SHAREより下なら「条件に届かず」として銘柄を出す（analysis/watch_study.md参照。+30%以上の割合は比べる相手の約2倍）
 WATCH_MIN_ELAPSED = 5  # 「居続けている」の欄に出すのはこの営業日数目以降（日数が少なく割合だけ高い銘柄を除くため）
 WATCH_JUDGE_DAYS = (10, 20)  # 判定日（監視の開始から何営業日目か）
 WATCH_MAX_ITEMS = 5  # 「居続けている」の欄の表示件数の上限（新規が多い日も2000文字に収めるため）
@@ -102,15 +103,21 @@ def watch_lines():
     staying = watch[(watch["rs_top_share"] >= WATCH_MIN_SHARE) & (watch["elapsed"] >= WATCH_MIN_ELAPSED)]
     judged = staying[staying["elapsed"].isin(WATCH_JUDGE_DAYS)]
     ended = watch[(watch["elapsed"] == WATCH_DAYS) & (watch["rs_top_share"] < WATCH_MIN_SHARE)]
+    partial = ended[ended["rs_top_share"] >= WATCH_KEEP_SHARE]
     lines = ["", f"**監視中**: {len(watch)}銘柄（RS上位に居続け {len(staying)}）"]
     if len(judged) or len(ended):
         lines.append("🔔 判定日")
-        lines += format_items(judged, format_watch)
-        if len(ended):
-            lines.append(f"・{WATCH_DAYS}日目で{WATCH_MIN_SHARE:.0%}未満のため監視終了: {len(ended)}銘柄")
+        if len(judged):
+            lines.append(f"✅ RS上位にいた日が{WATCH_MIN_SHARE:.0%}以上（監視型の条件を満たす）: {len(judged)}銘柄")
+            lines += format_items(judged, format_watch)
+        if len(partial):
+            lines.append(f"🔸 {WATCH_DAYS}日目で{WATCH_KEEP_SHARE:.0%}以上{WATCH_MIN_SHARE:.0%}未満（監視型の条件に届かず）: {len(partial)}銘柄")
+            lines += format_items(partial, format_watch, WATCH_MAX_ITEMS)
+        if len(ended) > len(partial):
+            lines.append(f"⏹ {WATCH_DAYS}日目で{WATCH_KEEP_SHARE:.0%}未満のため監視終了: {len(ended) - len(partial)}銘柄")
     others = staying.drop(judged.index)
     if len(others):
-        lines.append(f"居続けている銘柄（{WATCH_MIN_ELAPSED}日目以降、RS上位にいた日が{WATCH_MIN_SHARE:.0%}以上）")
+        lines.append(f"👀 居続けている銘柄（{WATCH_MIN_ELAPSED}日目以降、RS上位にいた日が{WATCH_MIN_SHARE:.0%}以上）")
         lines += format_items(others, format_watch, WATCH_MAX_ITEMS)
     lines.append("※参考情報（買いの合図ではない）")
     return lines

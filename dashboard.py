@@ -28,6 +28,8 @@ BREADTH_METRICS = {
 SMALL_SECTOR = 10  # 銘柄数がこれ未満の業種は割合が振れやすいため※を付けて表示
 CANDIDATE_COUNT = 9  # 業種内候補タブに並べる銘柄数（3列×3行）
 HIGHLIGHT_STYLE = "color: #1565C0; font-weight: bold"  # リストで強調する行の文字色
+NEGATIVE_STYLE = "color: #C62828; font-weight: bold"  # リストで注意を促すセルの文字色（監視中タブのRSがマイナス）
+NEW_STYLE = "color: #2E7D32; font-weight: bold"  # RS上位タブで新規（前日に上位でなかった）銘柄の行の文字色
 RS_THRESHOLD_COLOR = "#9E9E9E"  # RSチャートのRS上位の境目の線
 PO_MARK_COLOR = "#FF9800"  # チャートのPO成立日の線と監視期間の塗り
 ENTRY_MARK_COLOR = "#7E57C2"  # チャートのRS上位入り日の線
@@ -356,7 +358,8 @@ def to_tradingview_watchlist(tickers):
 
 
 def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days, download_name, highlight=None,
-                         po_date_col=None, shade_watch=False, entry_date_col=None):
+                         po_date_col=None, shade_watch=False, entry_date_col=None, negative_col=None,
+                         highlight_style=HIGHLIGHT_STYLE):
     if display_df.empty:
         st.info("該当する銘柄はありません")
         return
@@ -365,12 +368,15 @@ def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days
 
     with col_list:
         st.subheader("リスト")
-        # highlight（display_dfと同じindexのbool）がTrueの行を強調する。Stylerは小数を6桁で表示するため桁を指定する
+        # highlight（display_dfと同じindexのbool）がTrueの行を強調し、negative_colの列でマイナスのセルを赤字にする。
+        # Stylerは小数を6桁で表示するため桁を指定する
         table = display_df
-        if highlight is not None:
-            table = display_df.style.apply(
-                lambda row: [HIGHLIGHT_STYLE if highlight[row.name] else ""] * len(row), axis=1
-            ).format(precision=2, na_rep="")
+        if highlight is not None or negative_col is not None:
+            table = display_df.style.format(precision=2, na_rep="")
+            if highlight is not None:
+                table = table.apply(lambda row: [highlight_style if highlight[row.name] else ""] * len(row), axis=1)
+            if negative_col is not None:
+                table = table.map(lambda v: NEGATIVE_STYLE if pd.notna(v) and v < 0 else "", subset=[negative_col])
         event = st.dataframe(
             table,
             width="stretch",
@@ -566,18 +572,25 @@ tab_rs, tab_po, tab_watch, tab_golden, tab_breadth, tab_overview, tab_candidates
 if tab_rs.open:
     with tab_rs:
         ranking = load_ranking()
-        st.caption(f"流動性フィルタ通過後、TOPIX(1306.T)に対する相対強度(21営業日)の上位{len(ranking)}銘柄")
         display_df = ranking.copy()
         display_df["RS(%)"] = (display_df["relative_strength"] * 100).round(2)
         # 境目の1銘柄ほどはrs_ranking.csv（件数×10%を切り捨て）とload_rs_top()の上位がずれ、上位入りの列が空欄になる
         display_df = display_df.merge(load_rs_entry(), on="ticker", how="left")
+        # 前日にRS上位にいなかった銘柄（通知の「新規」に当たる。通知は前日のrs_ranking.csvと比べるため、境目の1銘柄ほどずれることがある）
+        top, _ = load_rs_top()
+        new = ~display_df["ticker"].map(top.iloc[-2]).eq(True)
+        st.caption(
+            f"流動性フィルタ通過後、TOPIX(1306.T)に対する相対強度(21営業日)の上位{len(ranking)}銘柄"
+            f"（緑字は新規{new.sum()}銘柄: 前日にRS上位{RS_TOP_PCT:.0%}にいなかった銘柄）"
+        )
         display_df["last_fresh_po"] = display_df["ticker"].map(load_last_fresh_po())
         display_df = display_df[
             ["33業種区分", "銘柄名", "ticker", "RS(%)", "entry_date", "entry_elapsed", "entry_top_days", "last_fresh_po"]
         ].rename(columns={"33業種区分": "業種", "entry_date": "上位入り日", "entry_elapsed": "経過日数",
                           "entry_top_days": "RS上位日数", "last_fresh_po": "PO新規日"})
         render_screening_tab(display_df, "rs", ohlcv, close_wide, display_days, f"rs_top_{as_of:%Y%m%d}.txt",
-                             po_date_col="PO新規日", shade_watch=True, entry_date_col="上位入り日")
+                             po_date_col="PO新規日", shade_watch=True, entry_date_col="上位入り日",
+                             highlight=new, highlight_style=NEW_STYLE)
 
 if tab_po.open:
     with tab_po:
@@ -599,7 +612,7 @@ if tab_watch.open:
         watch = load_watch_list()
         st.caption(
             f"PO新規+RSプラスの翌日から{WATCH_DAYS}営業日目までの{len(watch)}銘柄と、その間にRS上位{RS_TOP_PCT:.0%}にいた日数。"
-            f"青字は{WATCH_MIN_ELAPSED}日目以降でRS上位にいた日が{WATCH_MIN_SHARE:.0%}以上の銘柄。参考情報（買いの合図ではない）"
+            f"青字は{WATCH_MIN_ELAPSED}日目以降でRS上位にいた日が{WATCH_MIN_SHARE:.0%}以上の銘柄。赤字のRSはマイナス（RS上位から外れ、TOPIXより弱い）。参考情報（買いの合図ではない）"
         )
         display_df = watch.copy()
         display_df["RS上位(%)"] = (display_df["rs_top_share"] * 100).round().astype(int)
@@ -609,7 +622,8 @@ if tab_watch.open:
         ].rename(columns={"33業種区分": "業種", "po_date": "PO成立日", "elapsed": "経過日数", "rs_top_days": "RS上位日数"})
         staying = (watch["rs_top_share"] >= WATCH_MIN_SHARE) & (watch["elapsed"] >= WATCH_MIN_ELAPSED)
         render_screening_tab(display_df, "watch", ohlcv, close_wide, display_days,
-                             f"watch_list_{as_of:%Y%m%d}.txt", highlight=staying, po_date_col="PO成立日", shade_watch=True)
+                             f"watch_list_{as_of:%Y%m%d}.txt", highlight=staying, po_date_col="PO成立日", shade_watch=True,
+                             negative_col="RS(%)")
 
 if tab_golden.open:
     with tab_golden:

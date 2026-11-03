@@ -28,7 +28,7 @@ BREADTH_METRICS = {
 SMALL_SECTOR = 10  # 銘柄数がこれ未満の業種は割合が振れやすいため※を付けて表示
 CANDIDATE_COUNT = 9  # 業種内候補タブに並べる銘柄数（3列×3行）
 HIGHLIGHT_STYLE = "color: #1565C0; font-weight: bold"  # リストで強調する行の文字色
-NEGATIVE_STYLE = "color: #C62828; font-weight: bold"  # リストで注意を促すセルの文字色（監視中タブのRSがマイナス）
+NEGATIVE_STYLE = "color: #C62828; font-weight: bold"  # リストで注意を促す行の文字色（監視中タブのRSがマイナス）
 NEW_STYLE = "color: #2E7D32; font-weight: bold"  # RS上位タブで新規（前日に上位でなかった）銘柄の行の文字色
 RS_THRESHOLD_COLOR = "#9E9E9E"  # RSチャートのRS上位の境目の線
 PO_MARK_COLOR = "#FF9800"  # チャートのPO成立日の線と監視期間の塗り
@@ -368,7 +368,7 @@ def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days
 
     with col_list:
         st.subheader("リスト")
-        # highlight（display_dfと同じindexのbool）がTrueの行を強調し、negative_colの列でマイナスのセルを赤字にする。
+        # highlight（display_dfと同じindexのbool）がTrueの行を強調し、negative_colの列がマイナスの行を赤字にする（重なる場合は赤字が優先）。
         # Stylerは小数を6桁で表示するため桁を指定する
         table = display_df
         if highlight is not None or negative_col is not None:
@@ -376,7 +376,9 @@ def render_screening_tab(display_df, key_prefix, ohlcv, close_wide, display_days
             if highlight is not None:
                 table = table.apply(lambda row: [highlight_style if highlight[row.name] else ""] * len(row), axis=1)
             if negative_col is not None:
-                table = table.map(lambda v: NEGATIVE_STYLE if pd.notna(v) and v < 0 else "", subset=[negative_col])
+                table = table.apply(
+                    lambda row: [NEGATIVE_STYLE if pd.notna(row[negative_col]) and row[negative_col] < 0 else ""] * len(row), axis=1
+                )
         event = st.dataframe(
             table,
             width="stretch",
@@ -612,7 +614,7 @@ if tab_watch.open:
         watch = load_watch_list()
         st.caption(
             f"PO新規+RSプラスの翌日から{WATCH_DAYS}営業日目までの{len(watch)}銘柄と、その間にRS上位{RS_TOP_PCT:.0%}にいた日数。"
-            f"青字は{WATCH_MIN_ELAPSED}日目以降でRS上位にいた日が{WATCH_MIN_SHARE:.0%}以上の銘柄。赤字のRSはマイナス（RS上位から外れ、TOPIXより弱い）。参考情報（買いの合図ではない）"
+            f"青字は{WATCH_MIN_ELAPSED}日目以降でRS上位にいた日が{WATCH_MIN_SHARE:.0%}以上の銘柄。赤字はRSがマイナスの銘柄（RS上位から外れ、TOPIXより弱い。青字の条件より優先）。参考情報（買いの合図ではない）"
         )
         display_df = watch.copy()
         display_df["RS上位(%)"] = (display_df["rs_top_share"] * 100).round().astype(int)

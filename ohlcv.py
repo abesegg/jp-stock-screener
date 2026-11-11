@@ -43,11 +43,13 @@ def mismatched_tickers(fetched, existing, tolerance=MISMATCH_TOLERANCE):
     return sorted(merged.loc[diff >= tolerance, "ticker"].unique())
 
 
-def replace_history(existing, fresh):
+def replace_history(existing, fresh, extend=False):
     """freshに含まれる銘柄の、freshの最初の日以降の行をfreshで置き換える（それより前の行は残す）
-    置き換えるのは各銘柄が今持っている期間だけで、それより前の行は足さない（新たに足すのはbackfill_history.pyの役割）"""
-    first = existing.groupby("ticker")["date"].min()
-    fresh = fresh[fresh["date"] >= fresh["ticker"].map(first)]
+    extend=Falseなら置き換えるのは各銘柄が今持っている期間だけで、それより前の行は足さない（daily_update.py）。
+    extend=Trueならそれより前の行も足す（backfill_history.py。既存の行と補完した行の調整のずれによる段差を残さないため）"""
+    if not extend:
+        first = existing.groupby("ticker")["date"].min()
+        fresh = fresh[fresh["date"] >= fresh["ticker"].map(first)]
     start = fresh.groupby("ticker")["date"].min()
     stale = existing["ticker"].isin(start.index) & (existing["date"] >= existing["ticker"].map(start))
     combined = pd.concat([existing[~stale], fresh])
